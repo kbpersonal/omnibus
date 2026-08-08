@@ -23,6 +23,10 @@ model User {
   role                String    @default("USER") // "ADMIN" or "USER"
   isApproved          Boolean   @default(false)
   autoApproveRequests Boolean   @default(false)
+  // Manga is gated separately from comics: manga requests are fulfilled by Suwayomi, which needs no
+  // reviewer, while comic requests still go through the indexer queue. Defaults true so manga is
+  // self-serve out of the box; revoke per user to put one person's manga back behind approval.
+  autoApproveManga    Boolean   @default(true)
   canRequest          Boolean   @default(false)
   canDownload         Boolean   @default(false)
   canCreateGlobalLists  Boolean   @default(false)
@@ -86,7 +90,10 @@ model Request {
   userId             String   
   volumeId           String
   metadataSource     String   @default("COMICVINE")
-  status             String   // PENDING_APPROVAL, PENDING, DOWNLOADING, MANUAL_DDL, IMPORTED, UNRELEASED, AWAITING_RELEASE, STALLED
+  // PENDING_APPROVAL, PENDING, DOWNLOADING, MANUAL_DDL, IMPORTED, UNRELEASED, AWAITING_RELEASE, STALLED
+  // Manga path (Suwayomi): MONITORED_SUWAYOMI (terminal — added to the library, chapters enqueued,
+  // and Suwayomi keeps pulling new ones), NEEDS_SOURCE (no source configured, or no confident match).
+  status             String
   progress           Int      @default(0)
   retryCount         Int      @default(0)
   indexer            String?

@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     const users = await prisma.user.findMany({
       select: { 
           id: true, username: true, email: true, role: true, 
-          isApproved: true, autoApproveRequests: true, canRequest: true, canDownload: true, canCreateGlobalLists: true,
+          isApproved: true, autoApproveRequests: true, autoApproveManga: true, canRequest: true, canDownload: true, canCreateGlobalLists: true,
           createdAt: true, twoFactorEnabled: true,
           libraryAccess: { select: { libraryId: true } }
       },
@@ -35,7 +35,7 @@ export async function PATCH(req: NextRequest) {
   if (token?.role !== 'ADMIN') return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const { id, isApproved, role, autoApproveRequests, canRequest, canDownload, canCreateGlobalLists, reset2FA, libraryIds, tier } = await req.json();
+    const { id, isApproved, role, autoApproveRequests, autoApproveManga, canRequest, canDownload, canCreateGlobalLists, reset2FA, libraryIds, tier } = await req.json();
 
     if (id === token.id && role !== undefined && role !== 'ADMIN') {
         return NextResponse.json({ error: "You cannot remove your own Admin privileges." }, { status: 400 });
@@ -47,6 +47,7 @@ export async function PATCH(req: NextRequest) {
     if (isApproved !== undefined) updateData.isApproved = isApproved;
     if (role !== undefined) updateData.role = role;
     if (autoApproveRequests !== undefined) updateData.autoApproveRequests = autoApproveRequests;
+    if (autoApproveManga !== undefined) updateData.autoApproveManga = autoApproveManga;
     if (canRequest !== undefined) updateData.canRequest = canRequest;
     if (canDownload !== undefined) updateData.canDownload = canDownload;
     if (canCreateGlobalLists !== undefined) updateData.canCreateGlobalLists = canCreateGlobalLists;
@@ -56,6 +57,7 @@ export async function PATCH(req: NextRequest) {
         if (role === 'ADMIN') {
             updateData.isApproved = true;
             updateData.autoApproveRequests = true;
+            updateData.autoApproveManga = true;
             updateData.canRequest = true;
             updateData.canDownload = true;
             updateData.canCreateGlobalLists = true;
@@ -145,7 +147,7 @@ export async function POST(req: NextRequest) {
 
   try {
       const body = await req.json();
-      const { username, email, password, role, isApproved, autoApproveRequests, canRequest, canDownload, canCreateGlobalLists, tier } = body;
+      const { username, email, password, role, isApproved, autoApproveRequests, autoApproveManga, canRequest, canDownload, canCreateGlobalLists, tier } = body;
 
       if (!username || !email || !password) {
           return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
@@ -174,6 +176,9 @@ export async function POST(req: NextRequest) {
               role: role || 'USER',
               isApproved: isApproved !== undefined ? isApproved : true,
               autoApproveRequests: role === 'ADMIN' ? true : (autoApproveRequests || false),
+              // Unlike the other flags this defaults ON when the caller omits it, matching the schema
+              // default — manga is self-serve unless an admin deliberately turns it off.
+              autoApproveManga: role === 'ADMIN' ? true : (autoApproveManga !== undefined ? autoApproveManga : true),
               canRequest: role === 'ADMIN' ? true : (canRequest || false),
               canDownload: role === 'ADMIN' ? true : (canDownload || false),
               canCreateGlobalLists: role === 'ADMIN' ? true : (canCreateGlobalLists || false)

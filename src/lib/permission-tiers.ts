@@ -14,33 +14,38 @@
 export interface TierFlags {
   canRequest: boolean;
   autoApproveRequests: boolean;
+  autoApproveManga: boolean;
   canDownload: boolean;
   canCreateGlobalLists: boolean;
 }
 
 export type TierName = "Civilian" | "Sidekick" | "Vigilante" | "Hero";
 
+// `autoApproveManga` is true on every tier including Civilian, which looks odd next to
+// `autoApproveRequests` but is deliberate: manga requests are fulfilled by Suwayomi with no reviewer
+// in the loop, so approval buys nothing. The flag exists to revoke one problem user, not to ladder.
+// `canRequest` still gates whether a user can request at all, so Civilian remains unable to.
 /** Ordered low → high. The UI renders this ladder; `tierFromUser` matches against it. */
 export const PERMISSION_TIERS: { name: TierName; description: string; flags: TierFlags }[] = [
   {
     name: "Civilian",
     description: "Read the default Comics library only. Cannot request, download, or create global lists.",
-    flags: { canRequest: false, autoApproveRequests: false, canDownload: false, canCreateGlobalLists: false },
+    flags: { canRequest: false, autoApproveRequests: false, autoApproveManga: true, canDownload: false, canCreateGlobalLists: false },
   },
   {
     name: "Sidekick",
     description: "Request (needs admin approval) and download. Default Comics library.",
-    flags: { canRequest: true, autoApproveRequests: false, canDownload: true, canCreateGlobalLists: false },
+    flags: { canRequest: true, autoApproveRequests: false, autoApproveManga: true, canDownload: true, canCreateGlobalLists: false },
   },
   {
     name: "Vigilante",
     description: "Request (needs admin approval), download, and create global lists. All libraries.",
-    flags: { canRequest: true, autoApproveRequests: false, canDownload: true, canCreateGlobalLists: true },
+    flags: { canRequest: true, autoApproveRequests: false, autoApproveManga: true, canDownload: true, canCreateGlobalLists: true },
   },
   {
     name: "Hero",
     description: "Auto-approved requests, download, and global lists. All libraries.",
-    flags: { canRequest: true, autoApproveRequests: true, canDownload: true, canCreateGlobalLists: true },
+    flags: { canRequest: true, autoApproveRequests: true, autoApproveManga: true, canDownload: true, canCreateGlobalLists: true },
   },
 ];
 
@@ -62,11 +67,15 @@ export function tierFlags(name: TierName): TierFlags {
   return TIER_BY_NAME[name].flags;
 }
 
-/** Derive a user's display tier from their flags. ADMIN is its own label; an unrecognized combo is "Custom". */
+/** Derive a user's display tier from their flags. ADMIN is its own label; an unrecognized combo is "Custom".
+ *  `autoApproveManga` is deliberately NOT compared: it is true on every tier, so revoking it for one user
+ *  would otherwise drop them to "Custom" and lose the tier label over an orthogonal setting. */
 export function tierFromUser(u: {
   role?: string | null;
   canRequest?: boolean | null;
   autoApproveRequests?: boolean | null;
+  /** Accepted so callers can pass a whole user, but intentionally not part of the match below. */
+  autoApproveManga?: boolean | null;
   canDownload?: boolean | null;
   canCreateGlobalLists?: boolean | null;
 }): TierName | "Admin" | "Custom" {

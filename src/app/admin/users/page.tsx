@@ -5,7 +5,7 @@ import { useState, useEffect } from "react"
 import Link from "next/link"
 import { useSession } from "next-auth/react"
 import { Button } from "@/components/ui/button"
-import { ArrowLeft, Loader2, User as UserIcon, Trash2, Plus, Eye, Shield, DownloadCloud, Activity, ShieldOff, Mail, Globe, Send, Wand2, Library } from "lucide-react"
+import { ArrowLeft, Loader2, User as UserIcon, Trash2, Plus, Eye, Shield, DownloadCloud, Activity, ShieldOff, Mail, Globe, Send, Wand2, Library, BookOpen } from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
 import { copyText } from "@/lib/utils/clipboard"
 import { Switch } from "@/components/ui/switch"
@@ -55,7 +55,7 @@ export default function AdminUsersPage() {
   const [isCreating, setIsCreating] = useState(false)
   const [newUser, setNewUser] = useState({
       username: '', email: '', password: '', role: 'USER',
-      isApproved: true, canRequest: false, autoApproveRequests: false, canDownload: false, canCreateGlobalLists: false
+      isApproved: true, canRequest: false, autoApproveRequests: false, autoApproveManga: true, canDownload: false, canCreateGlobalLists: false
   })
   const [newUserTier, setNewUserTier] = useState<TierName>('Civilian')
   
@@ -268,7 +268,7 @@ export default function AdminUsersPage() {
           if (res.ok) {
               toast({ title: "User Created", description: `${newUser.username} has been added.` });
               setCreateModalOpen(false);
-              setNewUser({ username: '', email: '', password: '', role: 'USER', isApproved: true, canRequest: false, autoApproveRequests: false, canDownload: false, canCreateGlobalLists: false });
+              setNewUser({ username: '', email: '', password: '', role: 'USER', isApproved: true, canRequest: false, autoApproveRequests: false, autoApproveManga: true, canDownload: false, canCreateGlobalLists: false });
               setNewUserTier('Civilian');
               fetchUsers();
           } else throw new Error("Failed to create user");
@@ -388,6 +388,7 @@ export default function AdminUsersPage() {
                     <div className="grid grid-cols-2 gap-x-4 gap-y-1.5 min-w-[180px]">
                       <label className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground"><span>Request</span><Switch disabled={updating === user.id} checked={!!user.canRequest} onCheckedChange={(val) => handleUpdateUser(user.id, 'canRequest', val)} /></label>
                       <label className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground"><span>Auto</span><Switch disabled={updating === user.id || !user.canRequest} checked={user.autoApproveRequests} onCheckedChange={(val) => handleUpdateUser(user.id, 'autoApproveRequests', val)} /></label>
+                      <label className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground" title="Auto-approve manga requests (fulfilled by Suwayomi, no reviewer needed)"><span>Auto Manga</span><Switch disabled={updating === user.id || !user.canRequest} checked={user.autoApproveManga} onCheckedChange={(val) => handleUpdateUser(user.id, 'autoApproveManga', val)} /></label>
                       <label className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground"><span>Download</span><Switch disabled={updating === user.id} checked={user.canDownload} onCheckedChange={(val) => handleUpdateUser(user.id, 'canDownload', val)} /></label>
                       <label className="flex items-center justify-between gap-2 text-[11px] font-medium text-muted-foreground"><span>Global</span><Switch disabled={updating === user.id} checked={user.canCreateGlobalLists} onCheckedChange={(val) => handleUpdateUser(user.id, 'canCreateGlobalLists', val)} /></label>
                     </div>
@@ -515,7 +516,15 @@ export default function AdminUsersPage() {
                   </div>
                   <Switch disabled={updating === user.id || !user.canRequest} checked={user.autoApproveRequests} onCheckedChange={(val) => handleUpdateUser(user.id, 'autoApproveRequests', val)} className="scale-110" />
                 </div>
-                
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <BookOpen className="w-4 h-4 text-muted-foreground" />
+                    <Label className="font-semibold text-sm text-foreground">Auto-Approve Manga</Label>
+                  </div>
+                  <Switch disabled={updating === user.id || !user.canRequest} checked={user.autoApproveManga} onCheckedChange={(val) => handleUpdateUser(user.id, 'autoApproveManga', val)} className="scale-110" />
+                </div>
+
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
                     <DownloadCloud className="w-4 h-4 text-muted-foreground" />

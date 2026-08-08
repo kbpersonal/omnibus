@@ -8,10 +8,14 @@ describe('permission-tiers', () => {
   });
 
   it('maps each tier to the expected flag bundle', () => {
-    expect(tierFlags('Civilian')).toEqual({ canRequest: false, autoApproveRequests: false, canDownload: false, canCreateGlobalLists: false });
-    expect(tierFlags('Sidekick')).toEqual({ canRequest: true, autoApproveRequests: false, canDownload: true, canCreateGlobalLists: false });
-    expect(tierFlags('Vigilante')).toEqual({ canRequest: true, autoApproveRequests: false, canDownload: true, canCreateGlobalLists: true });
-    expect(tierFlags('Hero')).toEqual({ canRequest: true, autoApproveRequests: true, canDownload: true, canCreateGlobalLists: true });
+    expect(tierFlags('Civilian')).toEqual({ canRequest: false, autoApproveRequests: false, autoApproveManga: true, canDownload: false, canCreateGlobalLists: false });
+    expect(tierFlags('Sidekick')).toEqual({ canRequest: true, autoApproveRequests: false, autoApproveManga: true, canDownload: true, canCreateGlobalLists: false });
+    expect(tierFlags('Vigilante')).toEqual({ canRequest: true, autoApproveRequests: false, autoApproveManga: true, canDownload: true, canCreateGlobalLists: true });
+    expect(tierFlags('Hero')).toEqual({ canRequest: true, autoApproveRequests: true, autoApproveManga: true, canDownload: true, canCreateGlobalLists: true });
+  });
+
+  it('auto-approves manga on every tier — Suwayomi needs no reviewer', () => {
+    expect(PERMISSION_TIERS.every(t => t.flags.autoApproveManga)).toBe(true);
   });
 
   it('grants ALL libraries only to Vigilante and Hero', () => {
@@ -28,6 +32,12 @@ describe('permission-tiers', () => {
 
     it('treats missing flags as false → Civilian', () => {
       expect(tierFromUser({ role: 'USER' })).toBe('Civilian');
+    });
+
+    it('keeps the tier when autoApproveManga is revoked', () => {
+      // Manga approval is orthogonal to the ladder, so turning it off for one user must not
+      // relabel them "Custom" — tierFromUser deliberately ignores the flag.
+      expect(tierFromUser({ role: 'USER', ...tierFlags('Hero'), autoApproveManga: false })).toBe('Hero');
     });
 
     it('returns Custom for a flag combo that matches no preset', () => {

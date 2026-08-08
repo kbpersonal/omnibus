@@ -328,6 +328,22 @@ export async function initDatabase() {
         Logger.log(`[DB Init] canRequest backfill failed: ${getErrorMessage(e)}`, "error");
     }
 
+    // 11b. One-time backfill for `autoApproveManga`. The schema default is true, but `prisma db push`
+    //      only applies defaults to NEW rows — existing users would sit at false and see every manga
+    //      request queued for approval, which is the opposite of the intent. Sentinel-guarded like the
+    //      canRequest backfill above so an admin who later revokes a user isn't re-granted on reboot.
+    try {
+        const AUTOAPPROVE_MANGA_SENTINEL = 'perm_autoapprovemanga_backfilled';
+        const alreadyDone = await prisma.systemSetting.findUnique({ where: { key: AUTOAPPROVE_MANGA_SENTINEL } });
+        if (!alreadyDone) {
+            const res = await prisma.user.updateMany({ data: { autoApproveManga: true } });
+            await prisma.systemSetting.create({ data: { key: AUTOAPPROVE_MANGA_SENTINEL, value: new Date().toISOString() } });
+            Logger.log(`[DB Init] Backfilled autoApproveManga=true for ${res.count} existing user(s).`, "success");
+        }
+    } catch (e) {
+        Logger.log(`[DB Init] autoApproveManga backfill failed: ${getErrorMessage(e)}`, "error");
+    }
+
     // 12. One-time backfill for per-library access. Before this feature every user saw every library, so
     //     grant all current users access to every library to preserve that. New users created afterward are
     //     seeded with the default Comics library at creation time. Sentinel-guarded to run exactly once, and
