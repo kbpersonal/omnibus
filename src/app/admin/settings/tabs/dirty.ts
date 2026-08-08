@@ -68,6 +68,7 @@ const TAB_COLLECTIONS: Record<string, string[]> = {
     library: ['configuredLibraries'],
     search: ['configuredIndexers', 'scoringRules', 'customAcronyms'],
     downloads: ['configuredClients', 'configuredHosters', 'hosterPriority', 'searchSourcePriority'],
+    discovery: ['mangaSourcePriority'],
     notifications: ['configuredWebhooks'],
     access: ['customHeaders'],
 };

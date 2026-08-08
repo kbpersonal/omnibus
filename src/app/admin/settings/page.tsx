@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Checkbox } from "@/components/ui/checkbox"
 import { useToast } from "@/components/ui/use-toast"
 import { copyText } from "@/lib/utils/clipboard"
+import { getErrorMessage } from "@/lib/utils/error"
 import Link from "next/link"
 import { useSession } from "next-auth/react"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
@@ -82,6 +83,13 @@ export default function SettingsPage() {
       { source: 'annas_archive', enabled: false },
       { source: 'prowlarr', enabled: true }
   ])
+  // Manga source order for Suwayomi. Unlike the comic sources above there is no default list: source
+  // IDs are per-install snowflakes, so the options are fetched live from Suwayomi and the admin picks.
+  const [mangaSourcePriority, setMangaSourcePriority] = useState<{id: string, displayName?: string, isNsfw?: boolean, enabled: boolean}[]>([])
+  const [availableMangaSources, setAvailableMangaSources] = useState<any[]>([])
+  const [suwayomiSourcesLoading, setSuwayomiSourcesLoading] = useState(false)
+  const [suwayomiSourcesError, setSuwayomiSourcesError] = useState<string | null>(null)
+  const [showAllMangaLangs, setShowAllMangaLangs] = useState(false)
   const [hosterModalOpen, setHosterModalOpen] = useState(false)
   const [editingHoster, setEditingHoster] = useState<HosterAccountConfig | null>(null)
 
@@ -188,7 +196,7 @@ export default function SettingsPage() {
 
   const currentStateString = JSON.stringify({
       config, configuredLibraries, configuredIndexers, configuredClients,
-      configuredHosters, configuredWebhooks, customHeaders, customAcronyms, hosterPriority, searchSourcePriority, scoringRules
+      configuredHosters, configuredWebhooks, customHeaders, customAcronyms, hosterPriority, searchSourcePriority, mangaSourcePriority, scoringRules
   });
 
   const hasUnsavedChanges = isDataLoaded && initialStateHash !== "" && currentStateString !== initialStateHash;
@@ -261,6 +269,35 @@ export default function SettingsPage() {
         setTestResults(prev => ({ ...prev, clients: null }));
     }
   };
+
+  // Suwayomi's installed sources, re-fetched on every mount so extensions installed since the last
+  // visit show up without restarting Omnibus. On failure the saved order is left untouched and the
+  // tab shows a banner — losing a configured list because Suwayomi blipped would be far worse.
+  useEffect(() => {
+    let cancelled = false;
+    setSuwayomiSourcesLoading(true);
+    fetch('/api/admin/suwayomi-sources')
+      .then(async res => {
+        const data = await res.json();
+        if (cancelled) return;
+        if (!res.ok) {
+          setSuwayomiSourcesError(data.error || `HTTP ${res.status}`);
+          setAvailableMangaSources([]);
+          return;
+        }
+        setSuwayomiSourcesError(null);
+        setAvailableMangaSources(data.sources || []);
+        // Refresh cached display names in the saved order — a source can be renamed upstream, and
+        // the stored copy is only a fallback for when Suwayomi is unreachable.
+        setMangaSourcePriority(prev => prev.map(p => {
+          const live = (data.sources || []).find((s: any) => String(s.id) === String(p.id));
+          return live ? { ...p, displayName: live.displayName, isNsfw: live.isNsfw } : p;
+        }));
+      })
+      .catch(e => { if (!cancelled) { setSuwayomiSourcesError(getErrorMessage(e)); setAvailableMangaSources([]); } })
+      .finally(() => { if (!cancelled) setSuwayomiSourcesLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     fetch('/api/admin/config').then(res => res.json()).then(data => {
@@ -380,6 +417,18 @@ export default function SettingsPage() {
             } else {
                 setSearchSourcePriority(defaultSources);
             }
+
+            // Manga sources: whatever the admin saved, verbatim. Never seeded — an empty list is a
+            // real state meaning "manga requests will be flagged Needs Source".
+            const mspSetting = data.settings.find((s: any) => s.key === 'manga_source_priority');
+            if (mspSetting?.value) {
+                try {
+                    const saved = JSON.parse(mspSetting.value);
+                    if (Array.isArray(saved)) setMangaSourcePriority(saved);
+                } catch (e) {
+                    setMangaSourcePriority([]);
+                }
+            }
         }
 
         if (!newConfig.download_retry_delay) newConfig.download_retry_delay = "5";
@@ -439,6 +488,7 @@ export default function SettingsPage() {
             ...config,
             hoster_priority: JSON.stringify(hosterPriority),
             search_source_priority: JSON.stringify(searchSourcePriority),
+            manga_source_priority: JSON.stringify(mangaSourcePriority),
             release_scoring_rules: JSON.stringify(scoringRules)
         },
         libraries: configuredLibraries,
@@ -590,6 +640,32 @@ export default function SettingsPage() {
       const next = [...searchSourcePriority];
       next[index] = { ...next[index], enabled: !next[index].enabled };
       setSearchSourcePriority(next);
+  }
+
+  const addMangaSource = (id: string) => {
+      if (!id || mangaSourcePriority.some(s => s.id === id)) return;
+      const src = availableMangaSources.find((s: any) => String(s.id) === String(id));
+      // displayName/isNsfw are cached alongside the id so the list still renders meaningfully when
+      // Suwayomi is unreachable.
+      setMangaSourcePriority([...mangaSourcePriority, { id, displayName: src?.displayName, isNsfw: src?.isNsfw, enabled: true }]);
+  }
+
+  const removeMangaSource = (index: number) => {
+      setMangaSourcePriority(mangaSourcePriority.filter((_, i) => i !== index));
+  }
+
+  const moveMangaSource = (index: number, direction: -1 | 1) => {
+      const next = [...mangaSourcePriority];
+      const tmp = next[index];
+      next[index] = next[index + direction];
+      next[index + direction] = tmp;
+      setMangaSourcePriority(next);
+  }
+
+  const toggleMangaSourceEnabled = (index: number) => {
+      const next = [...mangaSourcePriority];
+      next[index] = { ...next[index], enabled: !next[index].enabled };
+      setMangaSourcePriority(next);
   }
 
   // Anna's Archive's premium key is stored as a HosterAccount; managed inline from the AA source section
@@ -880,6 +956,9 @@ export default function SettingsPage() {
     scoringRules, setScoringRules, customAcronyms, setCustomAcronyms,
     configuredClients, openClientSetup, deleteClient, setEditingClient, setClientModalOpen,
     searchSourcePriority, moveSearchSource, toggleSearchSourceEnabled,
+    mangaSourcePriority, availableMangaSources, suwayomiSourcesLoading, suwayomiSourcesError,
+    showAllMangaLangs, setShowAllMangaLangs,
+    addMangaSource, removeMangaSource, moveMangaSource, toggleMangaSourceEnabled,
     hosterPriority, moveHosterPriority, toggleHosterEnabled,
     configuredHosters, setAnnasKey, openHosterSetup, deleteHoster,
     applyRecommendedFilters, applyForeignFilters,

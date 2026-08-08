@@ -8,14 +8,18 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { Switch } from "@/components/ui/switch"
-import { Filter, Database } from "lucide-react"
+import { Badge } from "@/components/ui/badge"
+import { Filter, Database, BookOpen, ArrowUp, ArrowDown, Trash2, AlertTriangle } from "lucide-react"
 import { DEFAULT_MANGA_PUBLISHERS, DEFAULT_WESTERN_PUBLISHERS } from "@/lib/utils/default-publishers"
 
 import type { SettingsBag } from "./shared"
 
 export function DiscoveryTab({ s }: { s: SettingsBag }) {
   const {
-    config, setConfig, applyRecommendedFilters, applyForeignFilters
+    config, setConfig, applyRecommendedFilters, applyForeignFilters,
+    mangaSourcePriority, availableMangaSources, suwayomiSourcesLoading, suwayomiSourcesError,
+    showAllMangaLangs, setShowAllMangaLangs,
+    addMangaSource, removeMangaSource, moveMangaSource, toggleMangaSourceEnabled
   } = s;
 
   return (
@@ -104,6 +108,92 @@ export function DiscoveryTab({ s }: { s: SettingsBag }) {
                                 />
                             </div>
                         </div>
+                    </div>
+
+                    {/* Manga source priority — the ordered list Suwayomi searches for manga requests.
+                        Fed live from the server because source IDs differ on every install. */}
+                    <div className="space-y-4 pt-6 border-t border-border mt-4">
+                        <h3 className="text-lg font-bold text-foreground flex items-center gap-2">
+                            <BookOpen className="w-5 h-5 text-primary" /> Manga Source Priority
+                        </h3>
+                        <p className="text-[0.8rem] text-muted-foreground">
+                            Manga requests are fulfilled by Suwayomi, which can only search one source at a time — so Omnibus tries these in order and takes the first
+                            confident match. A source is only accepted when exactly one of its results matches the title exactly; anything ambiguous falls through to
+                            the next source, and if none match, the request is flagged <strong>Needs Source</strong> for you to handle by hand.
+                        </p>
+
+                        {suwayomiSourcesError && (
+                            <div className="flex items-start gap-2 p-3 rounded border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-300 text-xs">
+                                <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                                <span>Couldn&apos;t reach Suwayomi to list installed sources ({suwayomiSourcesError}). Your saved order below is intact — you just can&apos;t add new sources until Suwayomi is reachable.</span>
+                            </div>
+                        )}
+
+                        <div className="border border-border rounded-lg bg-muted/20 p-2 space-y-1">
+                            {mangaSourcePriority.length === 0 && (
+                                <p className="text-xs text-muted-foreground p-3">
+                                    No sources configured — manga requests will be flagged <strong>Needs Source</strong> until you add at least one.
+                                </p>
+                            )}
+                            {mangaSourcePriority.map((item: any, idx: number) => (
+                                <div key={item.id} className={`flex items-center justify-between p-3 bg-background border border-border rounded shadow-sm transition-opacity ${!item.enabled ? 'opacity-50' : ''}`}>
+                                    <div className="flex items-center gap-3 min-w-0">
+                                        <Badge variant="secondary" className="font-mono text-[10px] w-6 justify-center bg-muted shrink-0">{idx + 1}</Badge>
+                                        <span className={`font-bold truncate ${!item.enabled ? 'text-muted-foreground line-through' : 'text-foreground'}`}>
+                                            {item.displayName || item.id}
+                                        </span>
+                                        {item.isNsfw && (
+                                            <Badge variant="outline" className="text-[10px] uppercase font-bold border-red-400 text-red-600 dark:border-red-800 dark:text-red-400 shrink-0">NSFW</Badge>
+                                        )}
+                                    </div>
+                                    <div className="flex items-center gap-3 shrink-0">
+                                        <div className="flex items-center gap-2 mr-2 sm:border-r sm:border-border sm:pr-3">
+                                            <Switch checked={item.enabled} onCheckedChange={() => toggleMangaSourceEnabled(idx)} className="scale-90 sm:scale-100" />
+                                            <Label className="text-xs font-bold cursor-pointer hidden sm:block" onClick={() => toggleMangaSourceEnabled(idx)}>
+                                                {item.enabled ? "Enabled" : "Disabled"}
+                                            </Label>
+                                        </div>
+                                        <div className="flex items-center gap-1">
+                                            <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-muted" disabled={idx === 0} onClick={() => moveMangaSource(idx, -1)}>
+                                                <ArrowUp className="w-4 h-4" />
+                                            </Button>
+                                            <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-muted" disabled={idx === mangaSourcePriority.length - 1} onClick={() => moveMangaSource(idx, 1)}>
+                                                <ArrowDown className="w-4 h-4" />
+                                            </Button>
+                                            <Button variant="ghost" size="icon" className="h-8 w-8 hover:bg-muted text-destructive" onClick={() => removeMangaSource(idx)}>
+                                                <Trash2 className="w-4 h-4" />
+                                            </Button>
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex flex-col sm:flex-row gap-2 sm:items-center">
+                            <Select value="" onValueChange={(val) => addMangaSource(val)}>
+                                <SelectTrigger className="sm:w-[420px]">
+                                    <SelectValue placeholder={suwayomiSourcesLoading ? "Loading sources from Suwayomi..." : "Add a source..."} />
+                                </SelectTrigger>
+                                <SelectContent>
+                                    {availableMangaSources
+                                        .filter((src: any) => showAllMangaLangs || src.lang === 'en')
+                                        .filter((src: any) => !mangaSourcePriority.some((p: any) => p.id === src.id))
+                                        .map((src: any) => (
+                                            <SelectItem key={src.id} value={src.id}>
+                                                {src.displayName}{src.isNsfw ? ' — NSFW' : ''}
+                                            </SelectItem>
+                                        ))}
+                                </SelectContent>
+                            </Select>
+                            <div className="flex items-center gap-2">
+                                <Switch id="manga-all-langs" checked={showAllMangaLangs} onCheckedChange={setShowAllMangaLangs} />
+                                <Label htmlFor="manga-all-langs" className="text-xs cursor-pointer">Show all languages</Label>
+                            </div>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground">
+                            Only English sources are listed by default. The NSFW flag is advisory — many sources self-report it regardless of content, so treat it as
+                            information rather than a filter.
+                        </p>
                     </div>
                     <div className="space-y-4 pt-6 border-t border-border mt-4">
                         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
