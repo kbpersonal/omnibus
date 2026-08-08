@@ -17,10 +17,18 @@ import type { SettingsBag } from "./shared"
 export function DiscoveryTab({ s }: { s: SettingsBag }) {
   const {
     config, setConfig, applyRecommendedFilters, applyForeignFilters,
-    mangaSourcePriority, availableMangaSources, suwayomiSourcesLoading, suwayomiSourcesError,
-    showAllMangaLangs, setShowAllMangaLangs,
-    addMangaSource, removeMangaSource, moveMangaSource, toggleMangaSourceEnabled
+    suwayomiSourcesLoading, suwayomiSourcesError, showAllMangaLangs
   } = s;
+  // The bag is assembled dynamically and typed with an index signature, so these can be absent.
+  // Default them rather than assuming — the tab must still render if the lists haven't loaded.
+  const mangaSourcePriority = s.mangaSourcePriority ?? [];
+  const availableMangaSources = s.availableMangaSources ?? [];
+  const noop = () => {};
+  const setShowAllMangaLangs = s.setShowAllMangaLangs ?? noop;
+  const addMangaSource = s.addMangaSource ?? noop;
+  const removeMangaSource = s.removeMangaSource ?? noop;
+  const moveMangaSource = s.moveMangaSource ?? noop;
+  const toggleMangaSourceEnabled = s.toggleMangaSourceEnabled ?? noop;
 
   return (
     <>

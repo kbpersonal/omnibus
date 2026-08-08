@@ -962,7 +962,7 @@ const mappedRequests = requests.map(req => {
                                     </div>
                                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] sm:text-xs text-muted-foreground">
                                         <Badge variant={req.status === 'MANUAL_DDL' ? 'destructive' : req.status === 'IMPORTING' ? 'secondary' : 'outline'} className={`text-[9px] uppercase font-black px-1.5 py-0 ${req.status === 'STALLED' ? 'border-orange-500 text-orange-600' : ''} ${isExhausted ? 'border-red-500 text-red-600' : ''} ${req.status === 'IMPORTING' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 border-blue-300' : ''}`}>
-                                            {req.status === 'MANUAL_DDL' ? 'GETCOMICS' : req.status === 'IMPORTING' ? 'IMPORTING...' : req.status}
+                                            {req.status === 'MANUAL_DDL' ? 'GETCOMICS' : req.status === 'IMPORTING' ? 'IMPORTING...' : req.status === 'MONITORED_SUWAYOMI' ? 'MONITORED' : req.status === 'NEEDS_SOURCE' ? 'NEEDS SOURCE' : req.status}
                                         </Badge>
                                         {req.status === 'STALLED' && (
                                             <Badge variant="outline" className="text-[9px] uppercase font-black px-1.5 py-0 border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-900/20">

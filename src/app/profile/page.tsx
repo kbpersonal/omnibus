@@ -803,6 +803,8 @@ export default function ProfilePage() {
       case 'DOWNLOADING': return <Badge variant="outline" className="bg-primary/20 text-primary border-primary/30 text-[10px] uppercase font-bold">Downloading</Badge>;
       case 'PENDING_APPROVAL': return <Badge variant="outline" className="bg-orange-100 text-orange-800 border-orange-200 dark:bg-orange-900/30 dark:text-orange-400 text-[10px] uppercase font-bold text-center leading-tight">Needs Approval</Badge>;
       case 'FAILED': case 'STALLED': case 'ERROR': return <Badge variant="outline" className="bg-red-100 text-red-800 border-red-200 dark:bg-red-900/30 dark:text-red-400 text-[10px] uppercase font-bold">Failed</Badge>;
+      case 'MONITORED_SUWAYOMI': return <Badge variant="outline" className="bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-400 text-[10px] uppercase font-bold">Monitored</Badge>;
+      case 'NEEDS_SOURCE': return <Badge variant="outline" className="bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 text-[10px] uppercase font-bold text-center leading-tight">Needs Source</Badge>;
       default: return <Badge variant="outline" className="bg-muted text-foreground border-border text-[10px] uppercase font-bold">Pending</Badge>;
     }
   }

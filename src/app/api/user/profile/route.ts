@@ -45,7 +45,9 @@ export async function GET(req: Request) {
         total: requests.length,
         active: requests.filter(r => ['DOWNLOADING', 'PENDING', 'MANUAL_DDL'].includes(r.status)).length,
         pendingApproval: requests.filter(r => r.status === 'PENDING_APPROVAL').length,
-        completed: requests.filter(r => ['IMPORTED', 'COMPLETED'].includes(r.status)).length,
+        // A monitored manga counts as completed: Suwayomi has it and keeps pulling new chapters, so
+        // from the requester's side it is fulfilled.
+        completed: requests.filter(r => ['IMPORTED', 'COMPLETED', 'MONITORED_SUWAYOMI'].includes(r.status)).length,
         failed: requests.filter(r => ['FAILED', 'STALLED', 'ERROR'].includes(r.status)).length,
         historyStarted: started,
         historyCompleted: completed,

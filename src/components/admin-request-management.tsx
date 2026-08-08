@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Checkbox } from "@/components/ui/checkbox"
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog"
 import { useToast } from "@/components/ui/use-toast"
+import { requestStatusLabel, requestStatusColor } from "@/lib/request-status"
 import { 
   Search, Trash2, ExternalLink, Info, Loader2, ChevronsUpDown, AlertTriangle, 
   ChevronUp, ChevronDown, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Calendar, Users
@@ -189,13 +190,7 @@ export function AdminRequestManagement() {
     }
   }
 
-  const getStatusColor = (status: string) => {
-    if (['IMPORTED', 'COMPLETED'].includes(status)) return "bg-green-100 text-green-800 dark:bg-green-900/30 dark:text-green-400 border-green-200 dark:border-green-800";
-    if (status === 'DOWNLOADING') return "bg-primary/20 text-primary border-primary/30";
-    if (status === 'PENDING_APPROVAL') return "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400 border-orange-200 dark:border-orange-800";
-    if (status === 'UNRELEASED') return "bg-purple-100 text-purple-800 dark:bg-purple-900/30 dark:text-purple-400 border-purple-200 dark:border-purple-800";
-    return "bg-muted text-foreground border-border";
-  }
+  const getStatusColor = requestStatusColor;
 
   const SortIcon = ({ columnKey }: { columnKey: string }) => {
     if (sortConfig.key !== columnKey) return <ChevronsUpDown className="w-3 h-3 ml-1 opacity-50" />;
@@ -283,6 +278,8 @@ export function AdminRequestManagement() {
               <SelectItem value="DOWNLOADING" className="focus:bg-primary/10 focus:text-primary">Downloading</SelectItem>
               <SelectItem value="IMPORTED" className="focus:bg-primary/10 focus:text-primary">Imported</SelectItem>
               <SelectItem value="STALLED" className="focus:bg-primary/10 focus:text-primary">Stalled / Failed</SelectItem>
+              <SelectItem value="MONITORED_SUWAYOMI" className="focus:bg-primary/10 focus:text-primary">Monitored (Manga)</SelectItem>
+              <SelectItem value="NEEDS_SOURCE" className="focus:bg-primary/10 focus:text-primary">Needs Source (Manga)</SelectItem>
             </SelectContent>
           </Select>
 
@@ -358,7 +355,7 @@ export function AdminRequestManagement() {
                     <td className="px-4 py-3 text-muted-foreground truncate">{req.userName}</td>
                     <td className="px-4 py-3">
                       <Badge className={`${getStatusColor(req.status)} text-[10px] uppercase font-bold px-2 py-0.5 truncate`}>
-                        {req.status === 'PENDING_APPROVAL' ? 'Needs Approval' : req.status}
+                        {requestStatusLabel(req.status)}
                       </Badge>
                       {req.status === 'STALLED' && (
                         <Badge variant="outline" className="text-[9px] uppercase font-black px-1.5 py-0 border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-900/20 ml-2">
@@ -434,7 +431,7 @@ export function AdminRequestManagement() {
                         <Users className="w-3.5 h-3.5" /> <span className="font-medium truncate">{req.userName}</span>
                       </div>
                       <Badge className={`${getStatusColor(req.status)} text-[10px] uppercase font-bold px-2 py-0.5`}>
-                        {req.status === 'PENDING_APPROVAL' ? 'Needs Approval' : req.status}
+                        {requestStatusLabel(req.status)}
                       </Badge>
                       {req.status === 'STALLED' && (
                           <div className="mt-1.5">

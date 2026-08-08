@@ -157,7 +157,7 @@ function RequestCard({
                     <h3 className="font-bold text-lg sm:text-xl leading-tight line-clamp-1 text-foreground" title={displayName}>{displayName}</h3>
                     <div className="flex flex-wrap items-center gap-2">
                         <Badge variant="outline" className={`${getStatusColor(req.status)} text-[10px] font-bold uppercase tracking-wider`}>
-                            {req.status === 'PENDING_APPROVAL' ? 'Needs Approval' : req.status === 'MANUAL_DDL' ? 'GETCOMICS' : req.status === 'AWAITING_RELEASE' ? 'Awaiting' : req.status}
+                            {req.status === 'PENDING_APPROVAL' ? 'Needs Approval' : req.status === 'MANUAL_DDL' ? 'GETCOMICS' : req.status === 'AWAITING_RELEASE' ? 'Awaiting' : req.status === 'MONITORED_SUWAYOMI' ? 'Monitored' : req.status === 'NEEDS_SOURCE' ? 'Needs Source' : req.status}
                         </Badge>
                         {req.status === 'DOWNLOADING' && <span className="text-[11px] font-mono text-primary font-bold bg-primary/10 px-2 py-0.5 rounded">{req.progress}%</span>}
                         {isCompleted && <span className="text-[11px] text-green-700 dark:text-green-400 flex items-center gap-1 font-bold bg-green-50 dark:bg-green-900/20 px-2 py-0.5 rounded"><CheckCircle2 className="w-3 h-3"/> Ready in Library</span>}
@@ -321,6 +321,9 @@ export default function RequestsPage() {
       case 'FAILED': case 'STALLED': case 'ERROR': return "bg-red-100 text-red-800 border-red-200 dark:bg-red-900/30 dark:text-red-400 dark:border-red-800"
       case 'UNRELEASED': return "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-900/30 dark:text-purple-400 dark:border-purple-800"
       case 'AWAITING_RELEASE': return "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-400 dark:border-sky-800"
+      // Manga: monitored reads as success, needs-source as an admin to-do rather than a failure.
+      case 'MONITORED_SUWAYOMI': return "bg-sky-100 text-sky-800 border-sky-200 dark:bg-sky-900/30 dark:text-sky-400 dark:border-sky-800"
+      case 'NEEDS_SOURCE': return "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-800"
       default: return "bg-muted text-foreground border-border"
     }
   }
@@ -335,7 +338,9 @@ export default function RequestsPage() {
           if (activeTab === "PENDING_APPROVAL") return req.status === 'PENDING_APPROVAL';
           if (activeTab === "UNRELEASED") return req.status === 'UNRELEASED';
           if (activeTab === "AWAITING") return req.status === 'AWAITING_RELEASE';
-          if (activeTab === "COMPLETED") return ['IMPORTED', 'COMPLETED'].includes(req.status);
+          // A monitored manga is fulfilled from the user's side — Suwayomi has it and keeps pulling
+          // chapters — so it belongs with the completed requests rather than only under All.
+          if (activeTab === "COMPLETED") return ['IMPORTED', 'COMPLETED', 'MONITORED_SUWAYOMI'].includes(req.status);
           if (activeTab === "FAILED") return ['FAILED', 'STALLED', 'ERROR'].includes(req.status);
           if (activeTab === "CANCELLED") return req.status === 'CANCELLED';
           return true;

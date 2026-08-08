@@ -33,6 +33,7 @@ export default function Home() {
   const [pendingCount, setPendingCount] = useState(0)
   const [openReportsCount, setOpenReportsCount] = useState(0)
   const [manualDownloadsCount, setManualDownloadsCount] = useState(0)
+  const [needsSourceCount, setNeedsSourceCount] = useState(0)
   const [pendingUsersCount, setPendingUsersCount] = useState(0)
   const [unmatchedCount, setUnmatchedCount] = useState(0)
   const [updateData, setUpdateData] = useState<{ updateAvailable: boolean, currentVersion: string, latestVersion: string } | null>(null)
@@ -94,6 +95,8 @@ export default function Home() {
           setPendingCount(pending.length)
           const manual = data.filter((r: any) => r.status === 'MANUAL_DDL')
           setManualDownloadsCount(manual.length)
+          const needsSource = data.filter((r: any) => r.status === 'NEEDS_SOURCE')
+          setNeedsSourceCount(needsSource.length)
         }
 
         const resRep = await fetch(`/api/admin/reports?_t=${timestamp}`, { cache: 'no-store' })
@@ -290,6 +293,26 @@ export default function Home() {
               <AlertDescription className="text-primary/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                 Users have flagged comics or the system couldn't find them automatically. Manual intervention is required.
                 <Button asChild variant="outline" size="sm" className="border-primary/30 text-primary hover:bg-primary/10 h-8 font-bold">
+                  <Link href="/admin">
+                    Open Queue <ArrowRight className="ml-2 h-3 w-3" />
+                  </Link>
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {isAdmin && needsSourceCount > 0 && (
+            <Alert className="bg-amber-50 border-amber-200 dark:bg-amber-900/10 dark:border-amber-900/40 animate-in fade-in slide-in-from-top-4">
+              <Flag className="h-4 w-4 text-amber-600 dark:text-amber-400" />
+              <AlertTitle className="text-amber-700 dark:text-amber-400 font-bold flex items-center gap-2">
+                Manga Needs a Source
+                <Badge className="bg-amber-600 hover:bg-amber-600/90 text-white border-none text-[10px] h-5">
+                  {needsSourceCount}
+                </Badge>
+              </AlertTitle>
+              <AlertDescription className="text-amber-700/80 dark:text-amber-400/80 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                No configured Suwayomi source matched these manga requests confidently. Add or reorder sources, or match them by hand.
+                <Button asChild variant="outline" size="sm" className="border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-900/20 h-8 font-bold">
                   <Link href="/admin">
                     Open Queue <ArrowRight className="ml-2 h-3 w-3" />
                   </Link>

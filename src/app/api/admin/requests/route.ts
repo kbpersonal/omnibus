@@ -17,7 +17,10 @@ export async function GET(request: Request) {
     const activeOnly = searchParams.get('activeOnly') === 'true';
 
     const whereClause = activeOnly ? {
-        status: { in: ['PENDING', 'PENDING_APPROVAL', 'MANUAL_DDL', 'DOWNLOADING', 'STALLED', 'FAILED', 'ERROR'] }
+        // NEEDS_SOURCE is included because it is an admin to-do: a manga request that no configured
+        // source could match, waiting for someone to add a source or fix it by hand. MONITORED_SUWAYOMI
+        // is deliberately absent — it is terminal and needs no attention.
+        status: { in: ['PENDING', 'PENDING_APPROVAL', 'MANUAL_DDL', 'DOWNLOADING', 'STALLED', 'FAILED', 'ERROR', 'NEEDS_SOURCE'] }
     } : {};
 
     const requests = await prisma.request.findMany({
