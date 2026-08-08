@@ -12,6 +12,9 @@ import { getErrorMessage } from '@/lib/utils/error';
 import { ENGINE_URL, engineHeaders, engineFetchLong } from '@/lib/engine';
 import { isSameIssue, extractIssueNumber } from '@/lib/utils/issue-parser';
 import { processPageSweepChunk } from '@/lib/pages/page-sweep';
+import { resolveAndAdd, SOURCE_PRIORITY_KEY, type MangaSourceEntry } from '@/lib/suwayomi';
+import { applyReadingDirection } from '@/lib/komga';
+import { resolveManga } from '@/lib/manga-detector';
 
 function isNewerVersion(latest: string, current: string): boolean {
     const cleanLatest = latest.replace(/^v/, '');
@@ -51,11 +54,79 @@ function isNewerVersion(latest: string, current: string): boolean {
         } else if (!lIsNum && !cIsNum) {
             if (lPart > cPart) return true;
             if (lPart < cPart) return false;
-        } else { 
-            return !lIsNum; 
+        } else {
+            return !lIsNum;
         }
     }
     return false;
+}
+
+/**
+ * Manga acquisition: resolve the title against the admin-ordered Suwayomi source list, add the first
+ * confident match to Suwayomi's library, and enqueue its chapter backlog.
+ *
+ * Terminal on success. There is no progress loop because Suwayomi self-maintains an ongoing series
+ * (AUTO_DOWNLOAD_CHAPTERS + a periodic update sweep), so a running series has no "finished" moment to
+ * poll for — once it is inLibrary, new chapters keep arriving with no help from Omnibus.
+ *
+ * Komga reading direction is applied separately, after Komga's scanner has picked the series up.
+ */
+async function handleMangaRequest(requestId: string, name: string, year: string | number | null) {
+    Logger.log(`[Manga] Resolving "${name}" against configured Suwayomi sources...`, 'info');
+
+    const fail = async (detail: string, level: 'warn' | 'error' = 'warn') => {
+        Logger.log(`[Manga] ${detail}`, level);
+        await prisma.request.update({
+            where: { id: requestId },
+            // `indexer` is the request's existing "where did this come from" field; reusing it carries
+            // the reason to the UI without a schema change.
+            data: { status: 'NEEDS_SOURCE', indexer: detail.slice(0, 500) },
+        }).catch(() => {});
+    };
+
+    try {
+        const raw = (await prisma.systemSetting.findUnique({ where: { key: SOURCE_PRIORITY_KEY } }))?.value;
+        let sources: MangaSourceEntry[] = [];
+        if (raw) {
+            try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) sources = parsed;
+            } catch {
+                Logger.log(`[Manga] Source priority setting is not valid JSON; treating as unconfigured.`, 'error');
+            }
+        }
+
+        // One AniList lookup shared by source resolution and the later reading-direction step.
+        const { media } = await resolveManga({ name, year });
+
+        const outcome = await resolveAndAdd(sources, {
+            romaji: media?.titleRomaji,
+            english: media?.titleEnglish,
+            fallback: name,
+        });
+
+        if (!outcome.ok) {
+            await fail(outcome.detail);
+            return;
+        }
+
+        await prisma.request.update({
+            where: { id: requestId },
+            data: { status: 'MONITORED_SUWAYOMI', progress: 100, indexer: 'Suwayomi' },
+        });
+        Logger.log(
+            `[Manga] "${outcome.manga.title}" is now monitored by Suwayomi (${outcome.chaptersEnqueued} chapter(s) enqueued).`,
+            'success'
+        );
+
+        // Best-effort: the manga is downloaded and served either way, so a failure here must not fail
+        // the request. Runs detached because it waits on Suwayomi downloading and Komga scanning.
+        applyReadingDirection(outcome.manga.title, media?.countryOfOrigin ?? null).catch(e =>
+            Logger.log(`[Manga] Reading direction not applied for "${outcome.manga.title}": ${getErrorMessage(e)}`, 'warn')
+        );
+    } catch (e) {
+        await fail(`Suwayomi request failed for "${name}": ${getErrorMessage(e)}`, 'error');
+    }
 }
 
 // NOTE: the deep storage scan (per-series folder-size walk + storage_deep_dive_cache) is owned by
@@ -192,6 +263,17 @@ export function initWorker() {
             switch (type) {
                 case 'SEARCH_AND_DOWNLOAD': {
                     const { requestId, name, year, isManga, publisher, skipIndexers } = job.data;
+
+                    // Manga never reaches the Rust engine: Prowlarr/GetComics index comic releases,
+                    // not scanlations. Suwayomi + keiyoushi handles it instead and keeps pulling new
+                    // chapters on its own. Branching here covers every entry point, since the direct
+                    // request path, the admin approve path, and the cron sweeps all funnel through
+                    // searchAndDownload() into this job.
+                    if (isManga) {
+                        await handleMangaRequest(requestId, name, year);
+                        return;
+                    }
+
                     Logger.log(`[BullMQ] Forwarding automated search for ${name} (Year: ${year}, Manga: ${isManga}) to Rust Engine...`, 'info');
 
                     // Issue-year optimization + pack isolation + blocklist (parity with upstream

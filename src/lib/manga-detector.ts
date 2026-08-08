@@ -42,10 +42,18 @@ async function getDetectorSettings() {
     return cachedSettings;
 }
 
-export async function detectManga(
-    comicVineData: any, 
+/**
+ * Full manga verdict: whether it's manga, plus the AniList media behind the call when the AniList
+ * step produced the match. The manga request path needs the titles (to resolve a Suwayomi source)
+ * and countryOfOrigin (to set Komga's reading direction), and this keeps that to one lookup.
+ *
+ * `media` is null whenever the verdict came from an earlier waterfall step (publisher, concepts,
+ * ComicInfo) rather than AniList — isManga can be true with no media.
+ */
+export async function resolveManga(
+    comicVineData: any,
     filePath: string | null = null
-): Promise<boolean> {
+): Promise<{ isManga: boolean; media: AniListMedia | null }> {
     
     // Fetch settings (will hit RAM instantly 99% of the time)
     const { manga: mangaPublishers, western: westernPublishers } = await getDetectorSettings();
@@ -57,7 +65,7 @@ export async function detectManga(
         const publisher = comicVineData.publisher.name.toLowerCase();
         if (mangaPublishers.some((mp: string) => publisher.includes(mp))) {
             Logger.log(`[Manga Engine] Identified via Publisher: ${publisher}`, 'info');
-            return true;
+            return { isManga: true, media: null };
         }
     }
 
@@ -70,7 +78,7 @@ export async function detectManga(
         );
         if (hasMangaConcept) {
             Logger.log(`[Manga Engine] Identified via ComicVine Concepts`, 'info');
-            return true;
+            return { isManga: true, media: null };
         }
     }
 
@@ -83,7 +91,7 @@ export async function detectManga(
         );
         if (hasMangaGenre) {
             Logger.log(`[Manga Engine] Identified via Provider Genres`, 'info');
-            return true;
+            return { isManga: true, media: null };
         }
     }
 
@@ -108,13 +116,13 @@ export async function detectManga(
                             const mangaTag = jsonObj?.ComicInfo?.Manga;
                             if (mangaTag === 'Yes' || mangaTag === 'YesAndRightToLeft') {
                                 Logger.log(`[Manga Engine] Override: Identified via ComicInfo.xml`, 'info');
-                                return true;
+                                return { isManga: true, media: null };
                             }
                         }
                     } catch (e) {}
                 }
             }
-            return false; 
+            return { isManga: false, media: null }; 
         }
     }
 
@@ -124,11 +132,13 @@ export async function detectManga(
     if (comicVineData?.name) {
         try {
             const releaseYear = parseInt(comicVineData.year) || parseInt(comicVineData.start_year) || 0;
-            const isAniListMatch = await checkAniList(comicVineData.name, releaseYear);
-            
-            if (isAniListMatch) {
+            const aniListMatch = await checkAniList(comicVineData.name, releaseYear);
+
+            if (aniListMatch) {
                 Logger.log(`[Manga Engine] Identified via AniList API Match`, 'info');
-                return true;
+                // The only step that can supply media — the manga request path reuses these titles
+                // and countryOfOrigin rather than querying AniList a second time.
+                return { isManga: true, media: aniListMatch };
             }
         } catch (e) {
             Logger.log(`[Manga Engine] AniList check failed: ${getErrorMessage(e)}`, 'error');
@@ -149,20 +159,42 @@ export async function detectManga(
                     const parser = new XMLParser();
                     const jsonObj = parser.parse(xmlString);
                     if (jsonObj?.ComicInfo?.Manga === 'Yes' || jsonObj?.ComicInfo?.Manga === 'YesAndRightToLeft') {
-                        return true;
+                        return { isManga: true, media: null };
                     }
                 }
             } catch (e) {}
         }
     }
 
-    return false;
+    return { isManga: false, media: null };
+}
+
+/**
+ * Boolean form of {@link resolveManga}. Most callers only care whether something is manga; this
+ * keeps them unchanged so the fork's diff against upstream stays small.
+ */
+export async function detectManga(
+    comicVineData: any,
+    filePath: string | null = null
+): Promise<boolean> {
+    return (await resolveManga(comicVineData, filePath)).isManga;
+}
+
+/** The AniList fields the manga path needs: titles for source resolution, origin for reading direction. */
+export interface AniListMedia {
+    titleRomaji: string | null;
+    titleEnglish: string | null;
+    /** JP → right-to-left; KR/CN/TW → webtoon. Drives the Komga reading-direction patch. */
+    countryOfOrigin: string | null;
 }
 
 /**
  * Helper Function: Queries AniList GraphQL API with Fuzzy Year Logic
+ *
+ * Returns the matched media (so callers can reuse its titles and origin) or null when nothing
+ * matches — a non-null return is the "this is manga" signal.
  */
-async function checkAniList(title: string, releaseYear: number): Promise<boolean> {
+async function checkAniList(title: string, releaseYear: number): Promise<AniListMedia | null> {
     Logger.log(`[Manga Engine Debug] Querying AniList GraphQL API for title: "${title}"`, 'debug');
 
     const query = `
@@ -172,6 +204,7 @@ async function checkAniList(title: string, releaseYear: number): Promise<boolean
                     title { romaji english }
                     startDate { year }
                     format
+                    countryOfOrigin
                 }
             }
         }
@@ -183,7 +216,7 @@ async function checkAniList(title: string, releaseYear: number): Promise<boolean
         body: JSON.stringify({ query, variables: { search: title } })
     });
 
-    if (!response.ok) return false;
+    if (!response.ok) return null;
 
     const data = await response.json();
     const mediaResults = data?.data?.Page?.media || [];
@@ -199,12 +232,16 @@ async function checkAniList(title: string, releaseYear: number): Promise<boolean
                 const yearDiff = Math.abs(releaseYear - media.startDate.year);
                 if (yearDiff > 4) {
                     Logger.log(`[Manga Engine] AniList match rejected due to Year Mismatch (${releaseYear} vs JP ${media.startDate.year})`, 'info');
-                    continue; 
+                    continue;
                 }
             }
-            return true;
+            return {
+                titleRomaji: media.title?.romaji ?? null,
+                titleEnglish: media.title?.english ?? null,
+                countryOfOrigin: media.countryOfOrigin ?? null,
+            };
         }
     }
 
-    return false;
+    return null;
 }
