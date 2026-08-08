@@ -206,17 +206,17 @@ export async function POST(request: NextRequest) {
     // so a revoked/granted permission takes effect immediately rather than waiting for a new JWT.
     const requester = await prisma.user.findUnique({
       where: { id: (token.id || token.sub) as string },
-      select: { role: true, canRequest: true, autoApproveRequests: true },
+      select: { role: true, canRequest: true, autoApproveRequests: true, autoApproveManga: true },
     });
     const requesterIsAdmin = requester?.role === 'ADMIN';
     if (!requesterIsAdmin && !requester?.canRequest) {
       return NextResponse.json({ error: "You don't have permission to make requests. Ask an admin to grant you the Request permission." }, { status: 403 });
     }
-    const initialStatus = (requesterIsAdmin || requester?.autoApproveRequests) ? 'PENDING' : 'PENDING_APPROVAL';
 
     const safePublisher = publisher || "Unknown";
     // Detection precedence: an existing Series row's isManga (set by the scanner's full waterfall,
     // incl. ComicInfo + AniList) beats a request-time re-detection, which only has name+publisher.
+    // Resolved BEFORE the approval gate below, which now picks its flag by content type.
     let existingSeries: { isManga: boolean } | null = null;
     if (resolvedCvId) {
         try {
@@ -236,16 +236,25 @@ export async function POST(request: NextRequest) {
             return NextResponse.json({ error: 'Manga requests are disabled by the administrator (Settings → Filters).' }, { status: 403 });
         }
     }
+
+    // Manga and comics are approved independently: manga goes to Suwayomi (no reviewer), comics to
+    // the indexer queue. A user can be auto-approved for one and not the other.
+    const autoApprove = isManga ? requester?.autoApproveManga : requester?.autoApproveRequests;
+    const initialStatus = (requesterIsAdmin || autoApprove) ? 'PENDING' : 'PENDING_APPROVAL';
+
     const libraryTypeFolder = isManga ? 'Manga' : 'Comics';
 
     if (type === 'volume') {
       Logger.log(`[Request] User ${token.name} requested full Volume via ${metadataSource}: ${name}`, 'info');
       
       const libraries = await prisma.library.findMany();
-      let targetLib = isManga 
+      let targetLib = isManga
           ? libraries.find(l => l.isDefault && l.isManga) || libraries.find(l => l.isManga)
           : libraries.find(l => l.isDefault && !l.isManga) || libraries.find(l => !l.isManga);
-      if (!targetLib) targetLib = libraries[0];
+      // The libraries[0] fallback is comics-only. For manga it would resolve to the comics library
+      // when no manga library exists and compute a folder inside the comics tree — Suwayomi owns the
+      // manga write path, and Omnibus must never create a directory there.
+      if (!targetLib && !isManga) targetLib = libraries[0];
 
       const safeFolderName = name.replace(/[<>:"/\\|?*]/g, ' - ').replace(/\s+/g, ' ').trim();
       const safePubFolder = safePublisher !== "Unknown" ? safePublisher.replace(/[<>:"/\\|?*]/g, '').trim() : "Other";
@@ -265,8 +274,12 @@ export async function POST(request: NextRequest) {
           .trim();
 
       const folderParts = relFolderPath.split(/[/\\]/).map((p:string) => p.trim()).filter(Boolean);
-      const basePath = targetLib ? targetLib.path : `/${libraryTypeFolder}`;
-      
+      // Series.folderPath is non-nullable, so manga still records a path — but it points at
+      // Suwayomi's download root (where the CBZs actually land), never inside the comics tree.
+      // Nothing in the manga path creates this directory; Suwayomi does.
+      const mangaRoot = process.env.SUWAYOMI_DOWNLOADS_PATH || '/media-share/suwayomi-manga';
+      const basePath = targetLib ? targetLib.path : (isManga ? mangaRoot : `/${libraryTypeFolder}`);
+
       const folderPath = path.join(basePath, ...folderParts).replace(/\\/g, '/');
 
       const series = await prisma.series.upsert({
@@ -296,7 +309,12 @@ export async function POST(request: NextRequest) {
           }
       });
 
-      syncSeriesMetadata(resolvedCvId.toString(), series.folderPath, metadataSource).catch(err => {});
+      // Skipped for manga: syncSeriesMetadata mkdir -p's folderPath to cache covers/metadata, which
+      // is what previously created stray series folders in the comics tree for manga requests.
+      // Suwayomi is the only writer under the manga root (ADR-0001), so nothing here touches disk.
+      if (!isManga) {
+          syncSeriesMetadata(resolvedCvId.toString(), series.folderPath, metadataSource).catch(err => {});
+      }
 
       // Requesting is the strongest interest signal: auto-follow the series for the requester so it
       // feeds their Updates feed. Best-effort (never fails the request), idempotent, and covers the

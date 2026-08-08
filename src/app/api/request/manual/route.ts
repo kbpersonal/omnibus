@@ -70,10 +70,12 @@ export async function POST(request: NextRequest) {
             const isManga = await detectManga({ name, publisher: { name: safePublisher }, year: parseInt(year) });
             
             const libraries = await prisma.library.findMany();
-            let targetLib = isManga 
+            let targetLib = isManga
                 ? libraries.find(l => l.isDefault && l.isManga) || libraries.find(l => l.isManga)
                 : libraries.find(l => l.isDefault && !l.isManga) || libraries.find(l => !l.isManga);
-            if (!targetLib) targetLib = libraries[0];
+            // Comics-only fallback: for manga it would point the series at the comics tree when no
+            // manga library exists. See the same guard in ../route.ts.
+            if (!targetLib && !isManga) targetLib = libraries[0];
 
             // --- FIX: Fetch Settings and apply Custom Folder Naming Pattern ---
             const settings = await prisma.systemSetting.findMany();
@@ -94,7 +96,8 @@ export async function POST(request: NextRequest) {
 
             const folderParts = relFolderPath.split(/[/\\]/).map((p:string) => p.trim()).filter(Boolean);
             const libraryTypeFolder = isManga ? 'Manga' : 'Comics';
-            const basePath = targetLib ? targetLib.path : `/${libraryTypeFolder}`;
+            const mangaRoot = process.env.SUWAYOMI_DOWNLOADS_PATH || '/media-share/suwayomi-manga';
+            const basePath = targetLib ? targetLib.path : (isManga ? mangaRoot : `/${libraryTypeFolder}`);
             
             const folderPath = path.join(basePath, ...folderParts).replace(/\\/g, '/');
 
