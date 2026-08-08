@@ -3,10 +3,13 @@ name: Build, Publish, and Release Docker Image
 # main = stable channel: :latest + version tags + GitHub Release + release announcement.
 # dev  = soak channel: every push publishes floating :dev edge images for both containers —
 #        images only, never releases or announcements. (legacy-* branches are locked archives.)
+# manga / km-* = killinit fork channel (see docs/manga-fork.md). Every release, :latest, and
+#        Docker Hub step is gated on refs/heads/main, so these publish type=sha and type=ref
+#        images only — no GitHub Release, no tag collision with upstream's v* namespace.
 on:
   push:
-    branches: ['main', 'dev']
-    tags: ['v*']
+    branches: ['main', 'dev', 'manga']
+    tags: ['v*', 'km-*']
 
 env:
   REGISTRY: ghcr.io
@@ -91,19 +94,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }} 
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
+      # Docker Hub is upstream-only: this fork has no DOCKERHUB_* secrets, and an empty
+      # username fails the login step (and with it the GHCR push). GHCR is the only registry
+      # the fork publishes to, so the login and the Docker Hub image line are both dropped.
       - name: Extract metadata (tags, labels) for Docker
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.DOCKERHUB_REPO }}
           tags: |
             type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
             type=raw,value=v${{ env.VERSION }},enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
