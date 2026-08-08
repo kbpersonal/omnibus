@@ -20,10 +20,20 @@ acquiring new chapters forever, Komga serves it with the correct reading directi
 All work lands on **`manga`** — never this fork's `main` or `dev`. Pushing to `main` would try to
 cut a GitHub Release tagged with `package.json`'s version, colliding with upstream's `v*` namespace.
 
-Tags are `km-<upstream-version>-<n>` (`km` = killinit-manga), e.g. `km-1.4.2-1`, `km-1.4.2-2`, then
+Tags are `km-<upstream-version>-<n>` (`km` = killinit-manga), e.g. `km-1.4.3-1`, `km-1.4.3-2`, then
 `km-1.5.0-1` after rebasing onto upstream v1.5.0. The prefix can never collide with an upstream
 `v*` tag, and it records which upstream release the fork is carrying — the thing you need when
 rebasing.
+
+### Rebasing onto a new upstream release
+
+`git rebase v<version> manga`, then re-run `npm ci && npx prisma generate` (the Prisma client has to
+be regenerated for `autoApproveManga`) before `npm test`. Check the deployed image tag in the
+cluster manifest first — the fork must be rebased onto **at least** the version already running, or
+deploying it silently downgrades everything else.
+
+Note that upstream's `__tests__/app/library/library-page.test.tsx` pagination case fails on stock
+v1.4.3 as well; it is not caused by this fork.
 
 ### Workflow changes (`.github/workflows/docker-publish.yml`)
 
