@@ -600,22 +600,35 @@ async fn notify_node(event: &str, description: &str) {
         log::debug!("[Notify] NEXTAUTH_SECRET unset; skipping completion notification '{}'.", event);
         return;
     }
-    let node_url = std::env::var("OMNIBUS_NODE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let node_url = std::env::var("OMNIBUS_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
     let url = format!("{}/api/internal/notify", node_url.trim_end_matches('/'));
     let body = serde_json::json!({ "event": event, "payload": { "description": description } });
-    match shared_http_client()
-        .post(&url)
-        .header("X-Internal-Secret", &secret)
-        .json(&body)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await
-    {
-        Ok(resp) if !resp.status().is_success() => {
-            log::warn!("[Notify] Node /api/internal/notify returned {} for '{}'.", resp.status(), event);
+    const MAX_ATTEMPTS: usize = 4;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        let result = shared_http_client()
+            .post(&url)
+            .header("X-Internal-Secret", &secret)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => return,
+            Ok(resp) => log::warn!(
+                "[Notify] Node /api/internal/notify returned {} for '{}' (attempt {}/{}).",
+                resp.status(), event, attempt + 1, MAX_ATTEMPTS
+            ),
+            Err(e) => log::warn!(
+                "[Notify] Could not reach Node for completion notification '{}' (attempt {}/{}): {}",
+                event, attempt + 1, MAX_ATTEMPTS, e
+            ),
         }
-        Err(e) => log::warn!("[Notify] Could not reach Node for completion notification '{}': {}", event, e),
-        _ => {}
+
+        if attempt + 1 < MAX_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_secs(1 << attempt)).await;
+        }
     }
 }
 

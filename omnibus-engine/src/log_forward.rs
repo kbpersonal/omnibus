@@ -97,7 +97,7 @@ pub fn spawn_forwarder() {
         None => return,
     };
 
-    let node_url = std::env::var("OMNIBUS_NODE_URL").unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let node_url = std::env::var("OMNIBUS_NODE_URL").unwrap_or_else(|_| "http://127.0.0.1:3000".to_string());
     let secret = std::env::var("NEXTAUTH_SECRET").ok().filter(|s| !s.is_empty());
     let endpoint = format!("{}/api/internal/log", node_url.trim_end_matches('/'));
 
