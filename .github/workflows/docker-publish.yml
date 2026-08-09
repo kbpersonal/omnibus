@@ -123,7 +123,9 @@ jobs:
             CACHEBUST=${{ github.run_id }}
 
       - name: Update Docker Hub Description
-        if: success() && github.ref == format('refs/heads/{0}', 'main')
+        # Docker Hub credentials are available only in the upstream repository. Fork main builds
+        # publish to GHCR and must not fail after a successful image push on this metadata step.
+        if: success() && github.repository == 'hankscafe/omnibus' && github.ref == format('refs/heads/{0}', 'main')
         uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
