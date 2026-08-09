@@ -61,7 +61,8 @@ function ComicGridSkeleton({ count = 14 }: { count?: number }) {
 export function ComicGrid({ title, type, refreshSignal = 0 }: Props) {
   const { data: session } = useSession()
   // Admins, or users granted the Request permission, may make requests. Civilians cannot.
-  const canRequest = (session?.user as any)?.role === 'ADMIN' || !!(session?.user as any)?.canRequest
+  const isAdmin = (session?.user as any)?.role === 'ADMIN'
+  const canRequest = isAdmin || !!(session?.user as any)?.canRequest
   const [comics, setComics] = useState<Comic[]>([])
   const [loading, setLoading] = useState(true)
   
@@ -439,13 +440,13 @@ export function ComicGrid({ title, type, refreshSignal = 0 }: Props) {
                                         variant="outline" 
                                         className="w-full gap-1.5 border-dashed shadow-sm h-auto min-h-10 py-1.5 text-sm font-bold border-border hover:bg-muted text-foreground whitespace-normal" 
                                         onClick={() => setInteractiveQuery({ query: selectedComic.isVolume ? seriesBaseName : selectedComic.name, type: selectedComic.isVolume ? 'issue' : 'volume' })}
-                                        disabled={(isAllAvailableOwned && volStatus === 'LIBRARY_MONITORED') || (!selectedComic.isVolume && isIssueOwned) || overallStatus === 'PENDING_APPROVAL' || overallStatus === 'REQUESTED'}
+                                        disabled={(isAllAvailableOwned && volStatus === 'LIBRARY_MONITORED') || (!selectedComic.isVolume && isIssueOwned) || (!isAdmin && (overallStatus === 'PENDING_APPROVAL' || overallStatus === 'REQUESTED'))}
                                       >
                                           {(isAllAvailableOwned && volStatus === 'LIBRARY_MONITORED') ? (
                                               <><FileCheck className="w-4 h-4 text-emerald-500 shrink-0" /> <span className="leading-tight">Up to Date</span></>
-                                          ) : overallStatus === 'PENDING_APPROVAL' ? (
+                                          ) : !isAdmin && overallStatus === 'PENDING_APPROVAL' ? (
                                               <><Clock className="w-4 h-4 text-yellow-500 shrink-0" /> <span className="leading-tight">Pending Approval</span></>
-                                          ) : overallStatus === 'REQUESTED' ? (
+                                          ) : !isAdmin && overallStatus === 'REQUESTED' ? (
                                               <><Clock className="w-4 h-4 text-orange-500 shrink-0" /> <span className="leading-tight">Requested</span></>
                                           ) : (!selectedComic.isVolume && isIssueOwned) ? (
                                               <><FileCheck className="w-4 h-4 text-emerald-500 shrink-0" /> <span className="leading-tight">In Library</span></>

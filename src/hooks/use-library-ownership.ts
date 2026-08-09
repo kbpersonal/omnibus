@@ -9,6 +9,8 @@ export type StatusType =
   | 'UNRELEASED'
   | null;
 
+const TERMINAL_REQUEST_STATUSES = new Set(['CANCELLED', 'FAILED', 'ERROR', 'STALLED']);
+
 /**
  * Shared library-ownership + request-status logic for the Discover grid (comic-grid) and the
  * manual-search component (request-search). This used to be copy-pasted in both, which is how a
@@ -55,7 +57,9 @@ export function useLibraryOwnership(refreshSignal: unknown = 0) {
     if (requestedVolumes.has(idStr)) return 'REQUESTED';
 
     // Match in-flight requests by volume ID only (no loose name-prefix matching).
-    const activeReqs = activeRequests.filter(r => String(r.volumeId) === idStr);
+    const activeReqs = activeRequests.filter(r =>
+      String(r.volumeId) === idStr && !TERMINAL_REQUEST_STATUSES.has(r.status)
+    );
 
     if (activeReqs.length > 0) {
       const allCompleted = activeReqs.every(r => ['IMPORTED', 'COMPLETED'].includes(r.status));
@@ -84,9 +88,11 @@ export function useLibraryOwnership(refreshSignal: unknown = 0) {
     if (requestedIssues.has(issueName) || requestedIssues.has(coreName)) return 'REQUESTED';
 
     const req = activeRequests.find(r =>
-      (String(r.volumeId) === volStr && (r.name === issueName || r.name === coreName)) ||
-      (r.name && (r.name.toLowerCase() === cleanName || r.name.toLowerCase() === coreName)) ||
-      (r.activeDownloadName && (r.activeDownloadName.toLowerCase() === cleanName || r.activeDownloadName.toLowerCase() === coreName))
+      !TERMINAL_REQUEST_STATUSES.has(r.status) && (
+        (String(r.volumeId) === volStr && (r.name === issueName || r.name === coreName)) ||
+        (r.name && (r.name.toLowerCase() === cleanName || r.name.toLowerCase() === coreName)) ||
+        (r.activeDownloadName && (r.activeDownloadName.toLowerCase() === cleanName || r.activeDownloadName.toLowerCase() === coreName))
+      )
     );
 
     if (req) {
