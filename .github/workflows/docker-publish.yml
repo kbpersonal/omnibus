@@ -3,12 +3,12 @@ name: Build, Publish, and Release Docker Image
 # main = stable channel: :latest + version tags + GitHub Release + release announcement.
 # dev  = soak channel: every push publishes floating :dev edge images for both containers —
 #        images only, never releases or announcements. (legacy-* branches are locked archives.)
-# manga / km-* = killinit fork channel (see docs/manga-fork.md). Every release, :latest, and
-#        Docker Hub step is gated on refs/heads/main, so these publish type=sha and type=ref
-#        images only — no GitHub Release, no tag collision with upstream's v* namespace.
+# km-*  = killinit fork channel (see docs/fork.md). Every release, :latest, and Docker Hub
+#        step is gated on refs/heads/main, so these publish type=sha and type=ref images only —
+#        no GitHub Release, no tag collision with upstream's v* namespace.
 on:
   push:
-    branches: ['main', 'dev', 'manga']
+    branches: ['main', 'dev']
     tags: ['v*', 'km-*']
 
 env:
