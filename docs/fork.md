@@ -1,11 +1,19 @@
-# killinit manga fork
+# killinit omnibus fork
 
-This fork adds per-user manga requests backed by [Suwayomi](https://github.com/Suwayomi/Suwayomi-Server)
-instead of the Rust engine's Prowlarr/GetComics path. Komga serves the result.
+Local changes carried on top of upstream `hankscafe/omnibus` (GPL-3.0); this fork stays GPL.
 
-Upstream is `hankscafe/omnibus` (GPL-3.0); this fork stays GPL.
+What the fork currently carries:
 
-## Why
+- **Manga via Suwayomi** — per-user manga requests backed by
+  [Suwayomi](https://github.com/Suwayomi/Suwayomi-Server) instead of the Rust engine's
+  Prowlarr/GetComics path, with Komga serving the result. The largest change, detailed below.
+- **Mislabeled-release protection** — an import is refused when the archive inside the payload
+  belongs to a different series than the one requested, and the release is blocklisted so the
+  monitor cannot re-download it on the next tick.
+- **Cluster fixes** — engine retries for node callbacks and pod-relative paths, and admins can
+  retry interactive searches.
+
+## Why manga needed a fork
 
 Stock Omnibus has a single `autoApproveRequests` flag covering both comics and manga, plus a global
 `manga_requests_enabled` on/off — so "comics need approval, manga are automatic" cannot be
@@ -17,19 +25,19 @@ acquiring new chapters forever, Komga serves it with the correct reading directi
 
 ## Branch and tag conventions
 
-The manga work has been merged into this fork's **`main`**, and `main` is the branch the cluster
-actually runs: it builds `:latest` and `:v<package.json version>`, and the deployed image is one of
-those digests. `manga` is kept as the topic branch the feature landed from and now trails `main`.
-Build new work on `main`.
+**`main` on this fork is the development line, and it is what the cluster runs.** The manga work was
+merged into it and the `manga` topic branch has been deleted. Build new work on `main`; `origin`
+should point at this fork and `upstream` at `hankscafe/omnibus`, so a plain `git pull` never drags
+upstream commits onto the fork's `main` by surprise.
 
-Pushing `main` has two side effects worth knowing before you do it: it cuts a GitHub Release tagged
-`v<package.json version>` — the same namespace upstream uses, so bump the version first or the
-release step is skipped — and it announces that release to Discord.
+Pushing `main` builds `:latest` and `:v<package.json version>`, cuts a GitHub Release tagged
+`v<package.json version>`, and announces it to Discord. That tag shares upstream's namespace, so
+**bump `package.json` first** — reusing a version silently skips the release step and overwrites the
+existing image tag.
 
-`km-<upstream-version>-<n>` (`km` = killinit-manga) tags remain available for builds you want off
-the release path entirely, for example `km-1.4.3-2`. A `km-*` tag publishes `type=sha` / `type=ref`
-images only: no `:latest`, no GitHub Release, no Discord announcement. The prefix can never collide
-with an upstream `v*` tag and it records which upstream release the fork is carrying.
+`km-<upstream-version>-<n>` (`km` = killinit-manga) tags stay available for builds you want off the
+release path, for example `km-1.4.3-2`. A `km-*` tag publishes `type=sha` / `type=ref` images only:
+no `:latest`, no GitHub Release, no Discord announcement.
 
 ### Rebasing onto a new upstream release
 
@@ -59,8 +67,8 @@ publish to this fork's GHCR automatically with no further edits.
 
 ## Where the fork touches upstream
 
-Kept deliberately small so rebasing stays cheap. Everything is TypeScript — the Rust engine is
-untouched.
+Kept deliberately small so rebasing stays cheap. Almost all of it is TypeScript; the Rust engine
+carries one change (`git diff v<upstream-version> main -- omnibus-engine/` lists it).
 
 | Area | Files |
 |---|---|
@@ -71,6 +79,29 @@ untouched.
 | Source-priority setting | `src/app/api/admin/suwayomi-sources/route.ts` (new), `src/app/admin/settings/tabs/` |
 | Reading direction | `src/lib/komga.ts` (new) |
 | New request statuses | the status maps listed in `src/app/**` and `src/components/**` |
+| Mislabeled-release guard | `src/lib/importer.ts`, `src/lib/utils/release-match.ts` (new), `src/lib/utils/release-blocklist.ts` (new), `prisma/schema.prisma`, `src/lib/queue.ts`, `src/app/api/request/retry/route.ts` |
+| Engine log forwarding and pod paths | `omnibus-engine/src/log_forward.rs`, `omnibus-engine/src/main.rs` |
+
+## Design intent
+
+**Omnibus is a GUI application. Anything the software decides must be visible and reversible in the
+UI.** Nobody edits the database to operate this app, so a feature is not finished when its logic
+works — it is finished when a user can see what it did, understand why, and undo it without leaving
+the interface.
+
+Concretely, for any change:
+
+- State the software creates on its own — a blocked release, a stalled request, a quarantined file —
+  gets a view that lists it, the reason it happened, and when.
+- Every automatic decision gets a manual override. If the software can refuse something, a user must
+  be able to allow it anyway.
+- No hidden state. If behaviour changes because of a stored row, that row is inspectable in the UI.
+- "Fix it in the database" is never the answer offered to a user, and never the answer built toward.
+  If that is the only recourse, the feature is incomplete.
+
+This is why the release blocklist ships with an admin view and an Unblock button rather than a bare
+table: the guard that writes those rows can be wrong, and a wrong guess must not become a silent,
+permanent hole in someone's library with no visible cause.
 
 ## Design notes worth keeping
 
