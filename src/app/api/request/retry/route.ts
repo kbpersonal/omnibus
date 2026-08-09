@@ -8,6 +8,7 @@ import { enabledHostersFromSetting, scrapeDeepLinkViaEngine } from '@/lib/getcom
 import { Importer } from '@/lib/importer';
 import { omnibusQueue } from '@/lib/queue';
 import { ENGINE_URL, engineHeaders } from '@/lib/engine';
+import { getBlockedReleases } from '@/lib/utils/release-blocklist';
 
 export const dynamic = 'force-dynamic';
 
@@ -158,6 +159,11 @@ export async function POST(request: NextRequest) {
 
             let failedItems: string[] = [];
             try { failedItems = JSON.parse((req as any).failedLinks || "[]"); } catch { failedItems = []; }
+
+            // Releases proven bad at import time are blocked persistently, not on this row — a manual
+            // retry must honour them too or it re-grabs the release the importer just rejected.
+            const blocked = await getBlockedReleases(req.volumeId);
+            for (const b of blocked) if (!failedItems.includes(b)) failedItems.push(b);
 
             let resultData: any = null;
             try {

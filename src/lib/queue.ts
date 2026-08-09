@@ -15,6 +15,7 @@ import { processPageSweepChunk } from '@/lib/pages/page-sweep';
 import { resolveAndAdd, SOURCE_PRIORITY_KEY, type MangaSourceEntry } from '@/lib/suwayomi';
 import { applyReadingDirection } from '@/lib/komga';
 import { resolveManga } from '@/lib/manga-detector';
+import { getBlockedReleases } from '@/lib/utils/release-blocklist';
 
 function isNewerVersion(latest: string, current: string): boolean {
     const cleanLatest = latest.replace(/^v/, '');
@@ -291,6 +292,13 @@ export function initWorker() {
                     let requestedIssueReleaseDate: string | null = null;
                     if (freshReq) {
                         try { failedItems = JSON.parse((freshReq as any).failedLinks || "[]"); } catch { failedItems = []; }
+
+                        // Merge the persistent blocklist. failedLinks only remembers failures within
+                        // ONE request row, and the Series Monitor makes a new row every tick for an
+                        // issue it still sees as missing — so releases proven bad at import time have
+                        // to come from here or they win the search again on the very next cycle.
+                        const blocked = await getBlockedReleases(freshReq.volumeId);
+                        for (const b of blocked) if (!failedItems.includes(b)) failedItems.push(b);
                         if (freshReq.volumeId && freshReq.volumeId !== "0") {
                             const reqSource = (freshReq as any).metadataSource || 'COMICVINE';
                             const localSeries = await prisma.series.findFirst({ where: { metadataId: freshReq.volumeId, metadataSource: reqSource } });
@@ -954,8 +962,13 @@ export function initWorker() {
                     for (const c of (monitorData.candidates || [])) {
                         const alreadyReq = existingReqs.find(r => {
                             if (r.volumeId !== c.volume_id) return false;
+                            // activeDownloadName starts as the "<Series> #6: <title>" search name but is
+                            // OVERWRITTEN with the winning release title ("Absolute Superman 006 (2025)
+                            // (Digital) (Shan-Empire)") once a search picks one. That form has no #/issue
+                            // prefix, so this prefixed regex found nothing, the row failed to dedup, and
+                            // the monitor queued a duplicate request for the same issue every single tick.
                             const match = r.activeDownloadName?.match(/(?:#|issue\s*#?|ch(?:apter)?\s*\.?)\s*0*(\d+(?:\.\d+)?[a-zA-Z]?)/i);
-                            const reqNum = match ? match[1] : null;
+                            const reqNum = match ? match[1] : extractIssueNumber(r.activeDownloadName || "") || null;
                             return reqNum ? isSameIssue(reqNum, c.issue_number) : false;
                         });
 

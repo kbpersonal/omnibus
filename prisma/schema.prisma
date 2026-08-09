@@ -115,6 +115,24 @@ model Request {
   @@index([volumeId])
 }
 
+// Releases proven bad at import time (wrong series/issue inside the payload). Request.failedLinks is
+// per-request and the Series Monitor creates a FRESH request every tick, so a per-request blocklist is
+// wiped between attempts and the same bad release is re-grabbed forever. This survives that churn: the
+// search path merges matching rows into the engine's failed_links so the release is never picked again.
+// volumeId/issueNumber null = blocked everywhere (a globally mislabeled release).
+model ReleaseBlocklist {
+  id           String   @id @default(cuid())
+  releaseTitle String
+  downloadLink String?
+  volumeId     String?
+  issueNumber  String?
+  reason       String
+  createdAt    DateTime @default(now())
+
+  @@unique([releaseTitle, volumeId, issueNumber])
+  @@index([volumeId])
+}
+
 model Library {
   id        String   @id @default(cuid())
   name      String

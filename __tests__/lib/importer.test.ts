@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
     getAllActiveDownloads: vi.fn(),
     updateRequest: vi.fn(),
     createIssue: vi.fn(),
+    findFirstBlocklist: vi.fn().mockResolvedValue(null),
+    createBlocklist: vi.fn().mockResolvedValue({}),
     upsertSeries: vi.fn(),
     log: vi.fn(),
     sendAlert: vi.fn(),
@@ -36,7 +38,8 @@ vi.mock('@/lib/db', () => ({
         library: { findMany: mocks.findManyLibraries },
         series: { findFirst: mocks.findFirstSeries, upsert: mocks.upsertSeries, update: vi.fn() },
         issue: { create: mocks.createIssue, findFirst: vi.fn(), update: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
-        downloadClient: { findFirst: mocks.findFirstClient }
+        downloadClient: { findFirst: mocks.findFirstClient },
+        releaseBlocklist: { findFirst: mocks.findFirstBlocklist, create: mocks.createBlocklist, findMany: vi.fn().mockResolvedValue([]) }
     }
 }));
 
@@ -355,5 +358,94 @@ describe('File System: Importer Engine', () => {
         expect(result).toBe(true);
         expect(fs.copy).toHaveBeenCalled();
         expect(fs.remove).not.toHaveBeenCalled();
+    });
+
+    // ==== A correctly-labelled release can still CONTAIN someone else's comic. The label guard can't
+    // see that, so the wrong file was imported under the requested series' name — overwriting a real
+    // issue — and re-downloaded forever because nothing blocklisted it. ====
+
+    it('refuses a release whose payload belongs to a different series, and blocklists it', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING',
+            activeDownloadName: 'Absolute Superman 006 (2025) (Digital) (Shan-Empire) (cbz)',
+            downloadLink: 'nzb_abc', volumeId: 'cv_160860', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Absolute Superman', publisher: 'DC Comics', year: 2025, libraryId: 'lib_1', isManga: false
+        });
+
+        // SAB delivers a job FOLDER holding one archive — and that archive is a different comic.
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([
+            { name: '199808 Madman & The Jam 002.cbr', isDirectory: () => false }
+        ] as any);
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(false);
+        // Nothing was written into the library.
+        expect(fs.copy).not.toHaveBeenCalled();
+        expect(fs.move).not.toHaveBeenCalled();
+        // The request is parked for manual review…
+        expect(mocks.updateRequest).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({ status: 'STALLED' })
+        }));
+        // …and the release is blocked persistently, so the monitor's next (brand-new) request can't
+        // pick the same NZB again.
+        expect(mocks.createBlocklist).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                releaseTitle: 'Absolute Superman 006 (2025) (Digital) (Shan-Empire) (cbz)',
+                downloadLink: 'nzb_abc',
+                volumeId: 'cv_160860'
+            })
+        }));
+        expect(notifierSendAlert).toHaveBeenCalledWith('download_failed', expect.any(Object));
+
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    });
+
+    it('imports an obfuscated payload name instead of refusing it', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING', activeDownloadName: 'Batman 01 (2016)',
+            volumeId: 'cv_123', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Batman', publisher: 'DC Comics', year: 2016, libraryId: 'lib_1', isManga: false
+        });
+
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([
+            { name: 'a1b2c3d4e5f6.cbz', isDirectory: () => false }
+        ] as any);
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(true);
+        expect(mocks.createBlocklist).not.toHaveBeenCalled();
+
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    });
+
+    it('does not let a converted .cbr overwrite an existing .cbz of the same issue', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING', activeDownloadName: 'Batman 01 (2016).cbr',
+            volumeId: 'cv_123', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Batman', publisher: 'DC Comics', year: 2016, libraryId: 'lib_1', isManga: false
+        });
+
+        // The library already holds the real issue as .cbz. The incoming .cbr does NOT collide by its
+        // own name — only by the name it gets after conversion.
+        vi.mocked(fs.existsSync).mockImplementation((p: any) => !String(p).endsWith('Batman #01.cbr'));
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(true);
+        // Copied under a collision-safe name, never straight onto the existing issue.
+        const dest = vi.mocked(fs.copy).mock.calls.at(-1)?.[1] as string;
+        expect(dest).toMatch(/\d+_Batman #01\.cbr$/);
     });
 });

@@ -17,32 +17,39 @@ acquiring new chapters forever, Komga serves it with the correct reading directi
 
 ## Branch and tag conventions
 
-All work lands on **`manga`** — never this fork's `main` or `dev`. Pushing to `main` would try to
-cut a GitHub Release tagged with `package.json`'s version, colliding with upstream's `v*` namespace.
+The manga work has been merged into this fork's **`main`**, and `main` is the branch the cluster
+actually runs: it builds `:latest` and `:v<package.json version>`, and the deployed image is one of
+those digests. `manga` is kept as the topic branch the feature landed from and now trails `main`.
+Build new work on `main`.
 
-Tags are `km-<upstream-version>-<n>` (`km` = killinit-manga), e.g. `km-1.4.3-1`, `km-1.4.3-2`, then
-`km-1.5.0-1` after rebasing onto upstream v1.5.0. The prefix can never collide with an upstream
-`v*` tag, and it records which upstream release the fork is carrying — the thing you need when
-rebasing.
+Pushing `main` has two side effects worth knowing before you do it: it cuts a GitHub Release tagged
+`v<package.json version>` — the same namespace upstream uses, so bump the version first or the
+release step is skipped — and it announces that release to Discord.
+
+`km-<upstream-version>-<n>` (`km` = killinit-manga) tags remain available for builds you want off
+the release path entirely, for example `km-1.4.3-2`. A `km-*` tag publishes `type=sha` / `type=ref`
+images only: no `:latest`, no GitHub Release, no Discord announcement. The prefix can never collide
+with an upstream `v*` tag and it records which upstream release the fork is carrying.
 
 ### Rebasing onto a new upstream release
 
-`git rebase v<version> manga`, then re-run `npm ci && npx prisma generate` (the Prisma client has to
+`git rebase v<version> main`, then re-run `npm ci && npx prisma generate` (the Prisma client has to
 be regenerated for `autoApproveManga`) before `npm test`. Check the deployed image tag in the
 cluster manifest first — the fork must be rebased onto **at least** the version already running, or
 deploying it silently downgrades everything else.
 
-Note that upstream's `__tests__/app/library/library-page.test.tsx` pagination case fails on stock
-v1.4.3 as well; it is not caused by this fork.
+Note that 13 upstream component tests across four files — `library-page`, `smart-match-page-search`,
+`comic-grid` and `profile-updates-section` — fail on stock v1.4.3 as well (`localStorage` is
+undefined under the suite's default node environment). They are not caused by this fork.
 
 ### Workflow changes (`.github/workflows/docker-publish.yml`)
 
 Two edits, both fork-only:
 
-1. `manga` added to `push.branches` and `km-*` to `push.tags`. Upstream builds only on
-   `main`/`dev`/`v*`, so without this the fork publishes nothing. Every release, `:latest`, and
-   Docker Hub step is separately gated on `refs/heads/main`, so these triggers publish `type=sha`
-   and `type=ref` images only.
+1. `manga` added to `push.branches` and `km-*` to `push.tags`, so the fork can publish from a topic
+   branch or a `km-*` tag as well as from `main`. Every release, `:latest`, and Docker Hub step is
+   separately gated on `refs/heads/main`, so those two triggers publish `type=sha` and `type=ref`
+   images only.
 2. The Docker Hub login step and image line are removed. The fork has no `DOCKERHUB_*` secrets, and
    `docker/login-action` fails on an empty username — which would fail the job before the GHCR push.
    GHCR is the only registry this fork publishes to.

@@ -17,6 +17,8 @@ import { sanitizeFilename as sanitize } from '@/lib/utils/sanitize';
 import { WATCHED_DIR } from '@/lib/utils/paths';
 import { ENGINE_URL, engineHeaders } from '@/lib/engine';
 import { deleteUsenetSource } from '@/lib/utils/usenet-cleanup';
+import { payloadSeriesVerdict } from '@/lib/utils/release-match';
+import { blockRelease } from '@/lib/utils/release-blocklist';
 
 // Engine nested-pack helper (list when destDir is omitted, extract when given). Returns null on any
 // engine failure so callers fall back to the local AdmZip path — imports never break on a down engine.
@@ -561,7 +563,46 @@ export const Importer = {
     // from the download AND its parsed issue isn't one this volume actually has. The double condition keeps
     // a legitimately new (not-yet-synced) issue of the CORRECT series importable.
     if (series?.id && req.volumeId && req.volumeId !== "0") {
-        const downloadLabel = (req.activeDownloadName || path.basename(actualSourceFile) || "").toLowerCase();
+        const payloadName = path.basename(actualSourceFile);
+
+        // Shared rejection path. Parking the request as STALLED is not enough on its own: the Series
+        // Monitor creates a BRAND-NEW request for the still-missing issue on its next tick, and that
+        // row starts with an empty failedLinks — so the identical bad release wins the search again,
+        // downloads again, and re-imports again. Blocklisting the release is what actually ends it.
+        const rejectImport = async (logDetail: string, reason: string) => {
+            Logger.log(`[Importer] Aborting import: "${req.activeDownloadName}" ${logDetail}. Holding for manual review.`, 'warn');
+            await blockRelease({
+                releaseTitle: req.activeDownloadName || "",
+                downloadLink: req.downloadLink,
+                volumeId: req.volumeId,
+                issueNumber: extractIssueNumber(req.activeDownloadName || "") || null,
+                reason
+            });
+            await prisma.request.update({ where: { id: req.id }, data: { status: 'STALLED' } });
+            await SystemNotifier.sendAlert('download_failed', {
+                title: series.name,
+                imageUrl: req.imageUrl ?? undefined,
+                user: req.user?.username,
+                email: req.user?.email,
+                description: `The downloaded file **${req.activeDownloadName}** doesn't appear to match **${series.name}**, so it was not imported. Please use Interactive Search to grab the correct release.`
+            }).catch(() => {});
+            return false;
+        };
+
+        // Signal 1 — the PAYLOAD names a different comic. A release can be labelled correctly at the
+        // indexer and still contain someone else's book (a mislabeled NZB delivering "Madman & The Jam
+        // 002" inside a job named "Absolute Superman 006"). The label check below never sees that, so
+        // the wrong file was imported under the requested series' name, overwriting a real issue.
+        // Only a POSITIVE identification of another series rejects here — obfuscated or numeric inner
+        // filenames return 'unknown' and fall through to the label check.
+        if (payloadSeriesVerdict(payloadName, series.name || "") === 'mismatch') {
+            return await rejectImport(
+                `delivered "${payloadName}", which belongs to a different series than "${series.name}"`,
+                `Payload "${payloadName}" does not belong to series "${series.name}"`
+            );
+        }
+
+        const downloadLabel = (req.activeDownloadName || payloadName || "").toLowerCase();
         const seriesTokens = (series.name || "")
             .replace(/\b(19|20)\d{2}\b/g, ' ')
             .replace(/[^a-zA-Z0-9\s]/g, ' ')
@@ -570,22 +611,17 @@ export const Importer = {
             .filter((t: string) => t.length > 2 && !STOP_WORDS.includes(t));
         const seriesNameMissing = seriesTokens.length > 0 && !seriesTokens.every((t: string) => downloadLabel.includes(t));
 
+        // Signal 2 — the LABEL doesn't match and the issue it parses to isn't one this volume has.
         if (seriesNameMissing) {
-            const parsedIssue = extractIssueNumber(path.basename(actualSourceFile));
+            const parsedIssue = extractIssueNumber(payloadName);
             const knownIssues = await prisma.issue.findMany({ where: { seriesId: series.id } });
             const issueInVolume = knownIssues.some((i: any) => isSameIssue(i.number, parsedIssue));
 
             if (knownIssues.length > 0 && !issueInVolume) {
-                Logger.log(`[Importer] Aborting import: "${req.activeDownloadName}" does not match requested series "${series.name}" (series words missing and issue #${parsedIssue} not in this volume). Holding for manual review.`, 'warn');
-                await prisma.request.update({ where: { id: req.id }, data: { status: 'STALLED' } });
-                await SystemNotifier.sendAlert('download_failed', {
-                    title: series.name,
-                    imageUrl: req.imageUrl ?? undefined,
-                    user: req.user?.username,
-                    email: req.user?.email,
-                    description: `The downloaded file **${req.activeDownloadName}** doesn't appear to match **${series.name}**, so it was not imported. Please use Interactive Search to grab the correct release.`
-                }).catch(() => {});
-                return false;
+                return await rejectImport(
+                    `does not match requested series "${series.name}" (series words missing and issue #${parsedIssue} not in this volume)`,
+                    `Release does not match series "${series.name}" (issue #${parsedIssue} not in volume)`
+                );
             }
         }
     }
@@ -749,7 +785,15 @@ export const Importer = {
     try {
       await fs.ensureDir(destFolder);
 
-      if (fs.existsSync(finalPath)) {
+      // Collision check must cover the name this file will END UP with, not just the one it arrives
+      // with: a .cbr import is converted to .cbz further down and written over any existing .cbz of
+      // the same issue. Checking only the incoming .cbr name let a bad import silently destroy an
+      // already-imported issue, since the .cbr itself never collided.
+      const collisionCandidates = [finalPath];
+      if (/\.(cbr|rar|cb7)$/i.test(finalPath)) {
+        collisionCandidates.push(finalPath.replace(/\.[^/.]+$/, '.cbz'));
+      }
+      if (collisionCandidates.some(p => fs.existsSync(p))) {
         finalPath = path.join(destFolder, `${Date.now()}_${fileName}`);
       }
       
@@ -762,7 +806,11 @@ export const Importer = {
               }
 
               if (isFromClient || trackingHash) {
-                  Logger.log(`[Importer] Copying Torrent to Library (Preserving Seed): ${actualSourceFile} -> ${finalPath}`, "info");
+                  // Usenet jobs take this same copy branch (the source is deleted later by the usenet
+                  // cleanup, not seeded) — calling every copy a "Torrent" made SAB/NZBGet imports read
+                  // as torrent seeding in the log.
+                  const copyReason = sourceClientType && ['sab', 'nzbget'].includes(sourceClientType) ? 'Usenet' : 'Torrent (Preserving Seed)';
+                  Logger.log(`[Importer] Copying ${copyReason} to Library: ${actualSourceFile} -> ${finalPath}`, "info");
                   await fs.copy(actualSourceFile, finalPath, { overwrite: true });
               } else {
                   Logger.log(`[Importer] Moving DDL to Library: ${actualSourceFile} -> ${finalPath}`, "info");
