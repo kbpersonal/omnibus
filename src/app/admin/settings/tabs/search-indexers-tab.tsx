@@ -11,6 +11,7 @@ import { Switch } from "@/components/ui/switch"
 import { Badge } from "@/components/ui/badge"
 import { Cloud, Loader2, RefreshCw, Plus, Zap, Settings, Trash2, Target } from "lucide-react"
 import { StatusBox } from "./shared"
+import { BlockedReleases } from "@/components/blocked-releases"
 import type { SettingsBag } from "./shared"
 
 export function SearchIndexersTab({ s }: { s: SettingsBag }) {
@@ -292,6 +293,8 @@ export function SearchIndexersTab({ s }: { s: SettingsBag }) {
                             ))}
                         </div>
                     </div>
+
+                    <BlockedReleases />
                 </CardContent>
             </Card>
     </>
