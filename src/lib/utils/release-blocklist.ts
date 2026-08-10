@@ -14,6 +14,7 @@ import { Logger } from '@/lib/logger';
 export type BlockReleaseInput = {
     releaseTitle: string;
     downloadLink?: string | null;
+    metadataSource?: string | null;
     volumeId?: string | null;
     issueNumber?: string | null;
     reason: string;
@@ -28,11 +29,12 @@ export async function blockRelease(input: BlockReleaseInput): Promise<void> {
     if (!releaseTitle) return;
 
     const volumeId = input.volumeId && input.volumeId !== '0' ? input.volumeId : null;
+    const metadataSource = input.metadataSource || 'COMICVINE';
     const issueNumber = input.issueNumber || null;
 
     try {
         const existing = await prisma.releaseBlocklist.findFirst({
-            where: { releaseTitle, volumeId, issueNumber }
+            where: { releaseTitle, metadataSource, volumeId, issueNumber }
         });
         if (existing) return;
 
@@ -40,12 +42,13 @@ export async function blockRelease(input: BlockReleaseInput): Promise<void> {
             data: {
                 releaseTitle,
                 downloadLink: input.downloadLink || null,
+                metadataSource,
                 volumeId,
                 issueNumber,
                 reason: input.reason
             }
         });
-        Logger.log(`[Blocklist] Blocked release "${releaseTitle}"${volumeId ? ` for volume ${volumeId}` : ''}: ${input.reason}`, 'info');
+        Logger.log(`[Blocklist] Blocked release "${releaseTitle}"${volumeId ? ` for ${metadataSource} volume ${volumeId}` : ''}: ${input.reason}`, 'info');
     } catch (e: any) {
         Logger.log(`[Blocklist] Failed to block "${releaseTitle}": ${e.message}`, 'warn');
     }
@@ -55,9 +58,11 @@ export async function blockRelease(input: BlockReleaseInput): Promise<void> {
  * Titles and download links blocked for a volume, plus globally-blocked entries (volumeId null).
  * Returned flat so callers can concatenate straight into the engine's failed_links payload.
  */
-export async function getBlockedReleases(volumeId?: string | null): Promise<string[]> {
+export async function getBlockedReleases(volumeId?: string | null, metadataSource: string = 'COMICVINE'): Promise<string[]> {
     try {
-        const scoped = volumeId && volumeId !== '0' ? [{ volumeId }, { volumeId: null }] : [{ volumeId: null }];
+        const scoped = volumeId && volumeId !== '0'
+            ? [{ volumeId, metadataSource }, { volumeId: null }]
+            : [{ volumeId: null }];
         const rows = await prisma.releaseBlocklist.findMany({
             where: { OR: scoped },
             select: { releaseTitle: true, downloadLink: true }

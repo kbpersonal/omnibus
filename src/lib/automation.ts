@@ -3,6 +3,8 @@
 // SEARCH_AND_DOWNLOAD job, and queue.ts forwards it to the engine's /api/automation/search.
 // The legacy full-Node search (executeSearchAndDownload) was removed as dead code.
 
+import { randomUUID } from 'crypto';
+
 let nextAvailableSearchTime = Date.now();
 
 export async function searchAndDownload(requestId: string, name: string, year: string, publisher?: string, isManga: boolean = false, skipIndexers: boolean = false) {
@@ -18,7 +20,9 @@ export async function searchAndDownload(requestId: string, name: string, year: s
     type: 'SEARCH_AND_DOWNLOAD',
     requestId, name, year, publisher, isManga, skipIndexers
   }, {
-    jobId: `SEARCH_${requestId}`,
+    // Completed jobs are retained for debugging. Reusing SEARCH_<requestId> made BullMQ return
+    // the completed job on a retry, silently discarding the new search.
+    jobId: `SEARCH_${requestId}_${randomUUID()}`,
     delay: delayMs
   });
 }

@@ -338,7 +338,8 @@ export function AdminRequestManagement() {
                 <tr><td colSpan={7} className="text-center py-10 text-muted-foreground italic">No requests found matching criteria.</td></tr>
               ) : (
                 paginatedRequests.map((req) => {
-                  const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && (req.retryCount >= 3);
+                  const retryAttempt = Math.max(req.retryCount || 0, req.rejectedReleaseCount || 0);
+                  const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && retryAttempt >= 3;
 
                   return (
                   <tr key={req.id} className={`hover:bg-muted/50 transition-colors ${selectedIds.has(req.id) ? 'bg-primary/10' : ''}`}>
@@ -407,7 +408,8 @@ export function AdminRequestManagement() {
             <div className="text-center py-10 text-muted-foreground italic">No requests found.</div>
           ) : (
             paginatedRequests.map(req => {
-              const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && (req.retryCount >= 3);
+              const retryAttempt = Math.max(req.retryCount || 0, req.rejectedReleaseCount || 0);
+              const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && retryAttempt >= 3;
               const isSelected = selectedIds.has(req.id);
               
               return (

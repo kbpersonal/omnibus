@@ -96,6 +96,11 @@ model Request {
   status             String
   progress           Int      @default(0)
   retryCount         Int      @default(0)
+  // Number of releases rejected by the importer because their payload was for another comic.
+  // This is deliberately separate from retryCount, which is also used for client-download and
+  // missing-source retries. A bad release must trigger a new search without consuming either of
+  // those unrelated budgets.
+  rejectedReleaseCount Int    @default(0)
   indexer            String?
   downloadLink       String?
   activeDownloadName String?
@@ -124,13 +129,14 @@ model ReleaseBlocklist {
   id           String   @id @default(cuid())
   releaseTitle String
   downloadLink String?
+  metadataSource String @default("COMICVINE")
   volumeId     String?
   issueNumber  String?
   reason       String
   createdAt    DateTime @default(now())
 
-  @@unique([releaseTitle, volumeId, issueNumber])
-  @@index([volumeId])
+  @@unique([releaseTitle, metadataSource, volumeId, issueNumber])
+  @@index([metadataSource, volumeId])
 }
 
 model Library {

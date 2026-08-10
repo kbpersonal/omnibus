@@ -26,6 +26,7 @@ const ROW = {
     id: 'blk_1',
     releaseTitle: 'Absolute Superman 006 (2025) (Digital) (Shan-Empire) (cbz)',
     downloadLink: 'nzb_abc',
+    metadataSource: 'COMICVINE',
     volumeId: '160860',
     issueNumber: '6',
     reason: 'Payload "199808 Madman & The Jam 002.cbr" does not belong to series "Absolute Superman"',
@@ -38,7 +39,7 @@ describe('API: admin release blocklist', () => {
     beforeEach(() => {
         mocks.getToken.mockResolvedValue({ role: 'ADMIN', sub: 'user_1' });
         mocks.blocklistFindMany.mockResolvedValue([ROW]);
-        mocks.seriesFindMany.mockResolvedValue([{ metadataId: '160860', name: 'Absolute Superman' }]);
+        mocks.seriesFindMany.mockResolvedValue([{ metadataId: '160860', metadataSource: 'COMICVINE', name: 'Absolute Superman' }]);
         mocks.blocklistFindUnique.mockResolvedValue(ROW);
         mocks.blocklistDelete.mockResolvedValue(ROW);
     });

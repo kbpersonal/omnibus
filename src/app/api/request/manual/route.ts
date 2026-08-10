@@ -59,7 +59,8 @@ export async function POST(request: NextRequest) {
                 status: initialStatus,
                 activeDownloadName: searchResult?.title || name,
                 imageUrl: image || undefined,
-                retryCount: 0, // Reset retry count for fresh search
+                retryCount: 0, // Reset client-download retry count for fresh search
+                rejectedReleaseCount: 0,
                 failedLinks: "[]" // Reset the blocklist for manual override selections
             }
         });

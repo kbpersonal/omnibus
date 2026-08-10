@@ -297,7 +297,7 @@ export function initWorker() {
                         // ONE request row, and the Series Monitor makes a new row every tick for an
                         // issue it still sees as missing — so releases proven bad at import time have
                         // to come from here or they win the search again on the very next cycle.
-                        const blocked = await getBlockedReleases(freshReq.volumeId);
+                        const blocked = await getBlockedReleases(freshReq.volumeId, (freshReq as any).metadataSource || 'COMICVINE');
                         for (const b of blocked) if (!failedItems.includes(b)) failedItems.push(b);
                         if (freshReq.volumeId && freshReq.volumeId !== "0") {
                             const reqSource = (freshReq as any).metadataSource || 'COMICVINE';
@@ -1096,8 +1096,9 @@ export function initWorker() {
                             const skel = s.issues.find((i: any) => parseFloat(i.number) === reqNum);
                             if (skel?.releaseDate) searchYear = skel.releaseDate.split('-')[0];
                         }
-                        // Reset retryCount so a fresh find gets the cron's full download-retry budget.
-                        await prisma.request.update({ where: { id: req.id }, data: { status: 'PENDING', retryCount: 0, progress: 0 } });
+                        // Reset both independent retry budgets so a slow, fresh monitor search gets
+                        // its full download and rejected-release allowance.
+                        await prisma.request.update({ where: { id: req.id }, data: { status: 'PENDING', retryCount: 0, rejectedReleaseCount: 0, progress: 0 } });
                         searchAndDownload(req.id, req.activeDownloadName || "", searchYear, s?.publisher || "Unknown", s?.isManga || false).catch(() => {});
                         parkedRetried++;
                     }

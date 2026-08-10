@@ -20,6 +20,11 @@ import { deleteUsenetSource } from '@/lib/utils/usenet-cleanup';
 import { payloadSeriesVerdict } from '@/lib/utils/release-match';
 import { blockRelease } from '@/lib/utils/release-blocklist';
 
+// A wrong payload is a failed candidate, not a terminal request failure. Try two more releases
+// after the first rejection; each rejected release remains on the persistent blocklist so the
+// next search is forced to choose a different result.
+const MAX_REJECTED_RELEASE_ATTEMPTS = 3;
+
 // Engine nested-pack helper (list when destDir is omitted, extract when given). Returns null on any
 // engine failure so callers fall back to the local AdmZip path — imports never break on a down engine.
 async function engineNestedArchives(archivePath: string, destDir?: string): Promise<{ count: number, entries?: string[], files?: string[] } | null> {
@@ -565,26 +570,77 @@ export const Importer = {
     if (series?.id && req.volumeId && req.volumeId !== "0") {
         const payloadName = path.basename(actualSourceFile);
 
-        // Shared rejection path. Parking the request as STALLED is not enough on its own: the Series
-        // Monitor creates a BRAND-NEW request for the still-missing issue on its next tick, and that
-        // row starts with an empty failedLinks — so the identical bad release wins the search again,
-        // downloads again, and re-imports again. Blocklisting the release is what actually ends it.
+        // Shared rejection path. A wrong payload must not end the whole request: block the bad
+        // release, then immediately re-search this same issue so the engine can choose its next
+        // candidate. The persistent blocklist covers monitor-created requests; failedLinks covers
+        // this request even if the blocklist table cannot be written temporarily.
         const rejectImport = async (logDetail: string, reason: string) => {
-            Logger.log(`[Importer] Aborting import: "${req.activeDownloadName}" ${logDetail}. Holding for manual review.`, 'warn');
+            const releaseTitle = (req.activeDownloadName || payloadName || '').trim();
+            const issueNumber = extractIssueNumber(req.activeDownloadName || payloadName) || null;
+            const retrySearchName = issueNumber ? `${series.name} #${issueNumber}` : series.name;
+            const rejectedAttempt = (req.rejectedReleaseCount || 0) + 1;
+            const canRetry = rejectedAttempt < MAX_REJECTED_RELEASE_ATTEMPTS;
+
+            Logger.log(
+                `[Importer] Rejecting "${releaseTitle}" ${logDetail}. `
+                + (canRetry
+                    ? `Searching for another release (rejected candidate ${rejectedAttempt}/${MAX_REJECTED_RELEASE_ATTEMPTS}).`
+                    : `Rejected ${MAX_REJECTED_RELEASE_ATTEMPTS}/${MAX_REJECTED_RELEASE_ATTEMPTS} candidates; holding for manual review.`),
+                'warn'
+            );
             await blockRelease({
-                releaseTitle: req.activeDownloadName || "",
+                releaseTitle,
                 downloadLink: req.downloadLink,
+                metadataSource: req.metadataSource,
                 volumeId: req.volumeId,
-                issueNumber: extractIssueNumber(req.activeDownloadName || "") || null,
+                issueNumber,
                 reason
             });
-            await prisma.request.update({ where: { id: req.id }, data: { status: 'STALLED' } });
+
+            let failedLinks: string[] = [];
+            try { failedLinks = JSON.parse((req as any).failedLinks || '[]'); } catch { failedLinks = []; }
+            for (const blocked of [releaseTitle, req.downloadLink]) {
+                if (blocked && !failedLinks.includes(blocked)) failedLinks.push(blocked);
+            }
+
+            await prisma.request.update({
+                where: { id: req.id },
+                data: {
+                    status: canRetry ? 'PENDING' : 'STALLED',
+                    progress: 0,
+                    // Never let the direct-download retry cron download the known-bad link again.
+                    downloadLink: null,
+                    activeDownloadName: retrySearchName,
+                    failedLinks: JSON.stringify(failedLinks),
+                    rejectedReleaseCount: rejectedAttempt
+                }
+            });
+
+            if (canRetry) {
+                try {
+                    const { searchAndDownload } = await import('./automation');
+                    await searchAndDownload(
+                        req.id,
+                        retrySearchName,
+                        series.year ? String(series.year) : '',
+                        series.publisher || 'Unknown',
+                        isManga
+                    );
+                    return false;
+                } catch (e: any) {
+                    // A queue outage must leave a visible, recoverable request rather than a PENDING
+                    // row that the monitor considers already handled.
+                    Logger.log(`[Importer] Could not queue another release for "${retrySearchName}": ${e.message}`, 'error');
+                    await prisma.request.update({ where: { id: req.id }, data: { status: 'STALLED' } });
+                }
+            }
+
             await SystemNotifier.sendAlert('download_failed', {
                 title: series.name,
                 imageUrl: req.imageUrl ?? undefined,
                 user: req.user?.username,
                 email: req.user?.email,
-                description: `The downloaded file **${req.activeDownloadName}** doesn't appear to match **${series.name}**, so it was not imported. Please use Interactive Search to grab the correct release.`
+                description: `Omnibus rejected **${releaseTitle}** because its payload doesn't match **${series.name}**. It tried ${rejectedAttempt} different release${rejectedAttempt === 1 ? '' : 's'} and needs an Interactive Search or an unblock from Settings → Blocked Releases.`
             }).catch(() => {});
             return false;
         };

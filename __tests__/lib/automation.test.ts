@@ -32,7 +32,7 @@ describe('Core Logic: Automation (engine handoff)', () => {
                     isManga: false,
                     skipIndexers: true
                 },
-                expect.objectContaining({ jobId: 'SEARCH_req_1' })
+                expect.objectContaining({ jobId: expect.stringMatching(/^SEARCH_req_1_/) })
             );
         });
 
@@ -45,6 +45,16 @@ describe('Core Logic: Automation (engine handoff)', () => {
 
             // Second job must be scheduled at least ~5s after the first
             expect(delayB - delayA).toBeGreaterThanOrEqual(4000);
+        });
+
+        it('uses a fresh BullMQ job ID when the same request is searched again', async () => {
+            await searchAndDownload('req_retry', 'Batman #1', '2024');
+            await searchAndDownload('req_retry', 'Batman #1', '2024');
+
+            const [first, second] = mocks.queueAdd.mock.calls;
+            expect(first[2].jobId).toMatch(/^SEARCH_req_retry_/);
+            expect(second[2].jobId).toMatch(/^SEARCH_req_retry_/);
+            expect(second[2].jobId).not.toBe(first[2].jobId);
         });
     });
 
@@ -59,7 +69,7 @@ describe('Core Logic: Automation (engine handoff)', () => {
             expect(mocks.queueAdd).toHaveBeenCalledWith(
                 'SEARCH_AND_DOWNLOAD',
                 expect.objectContaining({ requestId: 'req_2', name: 'Akira', isManga: true }),
-                expect.objectContaining({ jobId: 'SEARCH_req_2' })
+                expect.objectContaining({ jobId: expect.stringMatching(/^SEARCH_req_2_/) })
             );
         });
     });

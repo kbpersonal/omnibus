@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
             Logger.log(`[Retry] Re-streaming GetComics direct download link via engine: ${req.downloadLink}`, 'info');
             await prisma.request.update({
                 where: { id },
-                data: { status: 'DOWNLOADING', retryCount: 0, progress: 0, failedLinks: "[]" }
+                data: { status: 'DOWNLOADING', retryCount: 0, rejectedReleaseCount: 0, progress: 0, failedLinks: "[]" }
             });
             DownloadService.downloadDirectFile(req.downloadLink, safeTitle, config.download_path, req.id, 'getcomics_main')
                 .then(async (success) => {
@@ -114,7 +114,7 @@ export async function POST(request: NextRequest) {
             if (enabledHosters.includes(hoster)) {
                 await prisma.request.update({
                     where: { id },
-                    data: { status: 'DOWNLOADING', retryCount: 0, progress: 0, failedLinks: "[]" }
+                    data: { status: 'DOWNLOADING', retryCount: 0, rejectedReleaseCount: 0, progress: 0, failedLinks: "[]" }
                 });
 
                 DownloadService.downloadDirectFile(url, safeTitle, config.download_path, req.id, hoster)
@@ -136,7 +136,7 @@ export async function POST(request: NextRequest) {
         if (req.downloadLink && req.downloadLink.startsWith('http') && !req.downloadLink.includes('getcomics.org')) {
             await prisma.request.update({
                 where: { id },
-                data: { status: 'DOWNLOADING', retryCount: 0, progress: 0, activeDownloadName: safeTitle, failedLinks: "[]" }
+                data: { status: 'DOWNLOADING', retryCount: 0, rejectedReleaseCount: 0, progress: 0, activeDownloadName: safeTitle, failedLinks: "[]" }
             });
             DownloadService.downloadDirectFile(req.downloadLink, safeTitle, config.download_path, req.id)
                 .then(async (success) => {
@@ -212,13 +212,13 @@ export async function POST(request: NextRequest) {
                          Logger.log(`[Retry] Batch pack already downloading or downloaded (${cand.url}). Queuing for batch extraction.`, 'info');
                          await prisma.request.update({
                              where: { id },
-                             data: { status: 'DOWNLOADING', retryCount: 0, progress: 0, activeDownloadName: safeSearchTitle, downloadLink: cand.url, failedLinks: "[]" }
+                             data: { status: 'DOWNLOADING', retryCount: 0, rejectedReleaseCount: 0, progress: 0, activeDownloadName: safeSearchTitle, downloadLink: cand.url, failedLinks: "[]" }
                          });
                          return NextResponse.json({ success: true, message: `Link recovered via ${cand.hoster.startsWith('getcomics') ? 'Direct' : cand.hoster} and queued for batch extraction.` });
                     }
                     await prisma.request.update({
                         where: { id },
-                        data: { status: 'DOWNLOADING', retryCount: 0, progress: 0, downloadLink: cand.url, activeDownloadName: safeSearchTitle, failedLinks: "[]" }
+                        data: { status: 'DOWNLOADING', retryCount: 0, rejectedReleaseCount: 0, progress: 0, downloadLink: cand.url, activeDownloadName: safeSearchTitle, failedLinks: "[]" }
                     });
 
                     DownloadService.downloadDirectFile(cand.url, safeSearchTitle, config.download_path, req.id, cand.hoster)

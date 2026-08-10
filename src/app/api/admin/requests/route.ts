@@ -63,7 +63,8 @@ export async function GET(request: Request) {
         progress: req.progress, 
         downloadLink: req.downloadLink,
         imageUrl: req.imageUrl && req.imageUrl.startsWith('http') ? `/api/library/cover?path=${encodeURIComponent(req.imageUrl)}` : req.imageUrl,
-        retryCount: req.retryCount || 0 
+        retryCount: req.retryCount || 0,
+        rejectedReleaseCount: req.rejectedReleaseCount || 0
       };
     });
 

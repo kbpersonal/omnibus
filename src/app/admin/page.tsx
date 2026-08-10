@@ -929,7 +929,8 @@ const mappedRequests = requests.map(req => {
                       )}
 
                       {pendingRequests.map((req) => {
-                        const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && (req.retryCount >= 3);
+                        const retryAttempt = Math.max(req.retryCount || 0, req.rejectedReleaseCount || 0);
+                        const isExhausted = ['STALLED', 'FAILED', 'ERROR'].includes(req.status) && retryAttempt >= 3;
                         const isSelected = selectedQueueItems.has(req.id);
 
                         return (
@@ -973,9 +974,9 @@ const mappedRequests = requests.map(req => {
                                         {req.status === 'DOWNLOADING' && (
                                             <span className="font-mono text-primary font-bold bg-primary/10 px-1.5 rounded">{req.progress}%</span>
                                         )}
-                                        {(req.retryCount > 0 && req.status !== 'DOWNLOADING') && (
+                                        {(retryAttempt > 0 && req.status !== 'DOWNLOADING') && (
                                             <span className={`font-mono font-bold px-1.5 rounded ${isExhausted ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400' : 'bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400'}`}>
-                                                Retry {req.retryCount}/3
+                                                Retry {retryAttempt}/3
                                             </span>
                                         )}
                                     </div>

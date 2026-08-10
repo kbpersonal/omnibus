@@ -26,17 +26,18 @@ export async function GET(req: NextRequest) {
     const series = volumeIds.length
       ? await prisma.series.findMany({
           where: { metadataId: { in: volumeIds } },
-          select: { metadataId: true, name: true }
+          select: { metadataId: true, metadataSource: true, name: true }
         })
       : [];
-    const nameByVolume = new Map(series.map(s => [s.metadataId, s.name]));
+    const nameByVolume = new Map(series.map(s => [`${s.metadataSource}:${s.metadataId}`, s.name]));
 
     return NextResponse.json({
       entries: rows.map(r => ({
         id: r.id,
         releaseTitle: r.releaseTitle,
         downloadLink: r.downloadLink,
-        seriesName: r.volumeId ? nameByVolume.get(r.volumeId) || null : null,
+        metadataSource: r.metadataSource,
+        seriesName: r.volumeId ? nameByVolume.get(`${r.metadataSource}:${r.volumeId}`) || null : null,
         volumeId: r.volumeId,
         issueNumber: r.issueNumber,
         reason: r.reason,

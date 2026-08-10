@@ -88,7 +88,8 @@ export async function GET(request: NextRequest) {
         downloadLink: req.downloadLink,
         indexer: (req as any).indexer,
         imageUrl: finalImageUrl && finalImageUrl.startsWith('http') ? `/api/library/cover?path=${encodeURIComponent(finalImageUrl)}` : finalImageUrl,
-        retryCount: req.retryCount || 0 
+        retryCount: req.retryCount || 0,
+        rejectedReleaseCount: req.rejectedReleaseCount || 0
       };
     }));
 
@@ -535,7 +536,7 @@ export async function PATCH(request: NextRequest) {
           status, 
           notified: false,
           // --- NEW: Reset blocklist and retries if pushing back to the automated queue ---
-          ...(status === 'PENDING' ? { failedLinks: "[]", retryCount: 0 } : {})
+          ...(status === 'PENDING' ? { failedLinks: "[]", retryCount: 0, rejectedReleaseCount: 0 } : {})
       }
     });
 

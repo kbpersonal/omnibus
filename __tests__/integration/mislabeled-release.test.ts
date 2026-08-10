@@ -7,17 +7,30 @@
 // from the file INSIDE the job, wrote "Absolute Superman #02.cbr", converted it to .cbz and destroyed
 // the real issue #2 — then did it again on every monitor tick, because nothing blocklisted the release.
 //
-// Unlike the unit suite this runs the REAL importer against a REAL filesystem and a REAL SQLite
+// Unlike the unit suite this runs the REAL importer against a REAL filesystem and a REAL Prisma
 // database, so the fs writes, the Prisma rows and the blocklist round-trip are all genuine. It creates
-// its own throwaway DB + temp dirs and removes them afterwards.
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+// its own throwaway SQLite DB by default; OMNIBUS_E2E_DATABASE_URL permits the exact same test against
+// an isolated loopback PostgreSQL instance.
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import fs from 'fs-extra';
 import path from 'path';
 import os from 'os';
 import { execFileSync } from 'child_process';
 
+const mocks = vi.hoisted(() => ({ searchAndDownload: vi.fn().mockResolvedValue(undefined) }));
+vi.mock('@/lib/automation', () => ({ searchAndDownload: mocks.searchAndDownload }));
+
 const TMP = path.join(os.tmpdir(), `omnibus-e2e-${Date.now()}`);
 const DB_FILE = path.join(TMP, 'e2e.db');
+const EXTERNAL_DATABASE_URL = process.env.OMNIBUS_E2E_DATABASE_URL;
+if (EXTERNAL_DATABASE_URL) {
+    const host = new URL(EXTERNAL_DATABASE_URL).hostname;
+    if (!['127.0.0.1', '::1', 'localhost'].includes(host)) {
+        throw new Error('OMNIBUS_E2E_DATABASE_URL must point to an isolated loopback database');
+    }
+}
+const DATABASE_URL = EXTERNAL_DATABASE_URL || `file:${DB_FILE}`;
+const PRISMA_SCHEMA = process.env.OMNIBUS_E2E_PRISMA_SCHEMA || 'prisma/schema.prisma';
 const DOWNLOADS = path.join(TMP, 'downloads');
 const LIBRARY = path.join(TMP, 'library');
 
@@ -27,7 +40,7 @@ const SERIES_FOLDER = path.join(LIBRARY, 'DC Comics', 'Absolute Superman (2025)'
 const REAL_ISSUE_2 = path.join(SERIES_FOLDER, 'Absolute Superman #02.cbz');
 const REAL_ISSUE_2_BYTES = Buffer.from('PK\x03\x04 the genuine Absolute Superman #2');
 
-process.env.DATABASE_URL = `file:${DB_FILE}`;
+process.env.DATABASE_URL = DATABASE_URL;
 
 let prisma: any;
 let Importer: any;
@@ -38,8 +51,8 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
         fs.ensureDirSync(TMP);
         execFileSync('node', [
             './node_modules/prisma/build/index.js', 'db', 'push',
-            '--schema=prisma/schema.prisma', '--skip-generate', '--accept-data-loss'
-        ], { env: { ...process.env, DATABASE_URL: `file:${DB_FILE}` }, stdio: 'pipe' });
+            `--schema=${PRISMA_SCHEMA}`, '--skip-generate', '--accept-data-loss'
+        ], { env: { ...process.env, DATABASE_URL }, stdio: 'pipe' });
 
         ({ prisma } = await import('@/lib/db'));
         ({ Importer } = await import('@/lib/importer'));
@@ -90,7 +103,7 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
         fs.removeSync(TMP);
     });
 
-    it('refuses the import, leaves the real issue intact, and blocks the release for good', async () => {
+    it('refuses the import, leaves the real issue intact, blocks the release, and queues another candidate', async () => {
         const req = await prisma.request.create({
             data: {
                 userId: 'user_1', volumeId: '160860', metadataSource: 'COMICVINE',
@@ -106,9 +119,15 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
         expect(fs.readFileSync(REAL_ISSUE_2)).toEqual(REAL_ISSUE_2_BYTES);
         expect(fs.readdirSync(SERIES_FOLDER)).toEqual(['Absolute Superman #02.cbz']);
 
-        // The request is parked instead of being closed out as a success.
+        // The original release is gone from the request, and the request is immediately re-queued
+        // for a different candidate instead of becoming a dead STALLED row.
         const after = await prisma.request.findUnique({ where: { id: req.id } });
-        expect(after.status).toBe('STALLED');
+        expect(after.status).toBe('PENDING');
+        expect(after.downloadLink).toBeNull();
+        expect(after.activeDownloadName).toBe('Absolute Superman #6');
+        expect(after.rejectedReleaseCount).toBe(1);
+        expect(JSON.parse(after.failedLinks)).toEqual(expect.arrayContaining([RELEASE, 'nzb_shan_006']));
+        expect(mocks.searchAndDownload).toHaveBeenCalledWith(req.id, 'Absolute Superman #6', '2025', 'DC Comics', false);
 
         // Issue #6 stays wanted — it genuinely was not delivered.
         const issue6 = await prisma.issue.findFirst({ where: { number: '6' } });
@@ -118,6 +137,7 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
         // The release is blocked persistently and scoped to this volume…
         const row = await prisma.releaseBlocklist.findFirst({ where: { releaseTitle: RELEASE } });
         expect(row).toBeTruthy();
+        expect(row.metadataSource).toBe('COMICVINE');
         expect(row.volumeId).toBe('160860');
         expect(row.downloadLink).toBe('nzb_shan_006');
 
@@ -140,5 +160,23 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
 
         const rows = await prisma.releaseBlocklist.findMany({ where: { releaseTitle: RELEASE } });
         expect(rows).toHaveLength(1);
+    }, 120000);
+
+    it('stops after the third rejected release and leaves the request visibly stalled', async () => {
+        const req = await prisma.request.create({
+            data: {
+                userId: 'user_1', volumeId: '160860', metadataSource: 'COMICVINE',
+                status: 'DOWNLOADING', rejectedReleaseCount: 2,
+                activeDownloadName: RELEASE, downloadLink: 'nzb_shan_006'
+            }
+        });
+
+        expect(await Importer.importRequest(req.id)).toBe(false);
+
+        const after = await prisma.request.findUnique({ where: { id: req.id } });
+        expect(after?.status).toBe('STALLED');
+        expect(after?.rejectedReleaseCount).toBe(3);
+        expect(after?.downloadLink).toBeNull();
+        expect(mocks.searchAndDownload).not.toHaveBeenCalled();
     }, 120000);
 });

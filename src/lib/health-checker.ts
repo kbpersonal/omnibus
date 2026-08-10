@@ -303,7 +303,13 @@ export async function runSystemHealthCheck() {
     const flagStalled = config.flag_stalled_requests !== 'false'; // default ON
     if (flagStalled) {
         const stalledReqs = await prisma.request.findMany({
-            where: { status: 'STALLED', retryCount: { gte: 3 }, ...notSnoozed },
+            where: {
+                status: 'STALLED',
+                AND: [
+                    { OR: [{ retryCount: { gte: 3 } }, { rejectedReleaseCount: { gte: 3 } }] },
+                    notSnoozed
+                ]
+            },
             select: { id: true, activeDownloadName: true }
         });
         if (stalledReqs.length > 0) {

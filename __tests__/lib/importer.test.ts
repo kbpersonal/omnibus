@@ -364,7 +364,7 @@ describe('File System: Importer Engine', () => {
     // see that, so the wrong file was imported under the requested series' name — overwriting a real
     // issue — and re-downloaded forever because nothing blocklisted it. ====
 
-    it('refuses a release whose payload belongs to a different series, and blocklists it', async () => {
+    it('refuses a release whose payload belongs to a different series, blocklists it, and tries the next release', async () => {
         mocks.findUniqueRequest.mockResolvedValueOnce({
             id: 'req_1', status: 'DOWNLOADING',
             activeDownloadName: 'Absolute Superman 006 (2025) (Digital) (Shan-Empire) (cbz)',
@@ -386,9 +386,15 @@ describe('File System: Importer Engine', () => {
         // Nothing was written into the library.
         expect(fs.copy).not.toHaveBeenCalled();
         expect(fs.move).not.toHaveBeenCalled();
-        // The request is parked for manual review…
+        // The same request is immediately sent back through search with a canonical query. Its
+        // failedLinks protects this search even if the persistent blocklist DB write ever fails.
         expect(mocks.updateRequest).toHaveBeenCalledWith(expect.objectContaining({
-            data: expect.objectContaining({ status: 'STALLED' })
+            data: expect.objectContaining({
+                status: 'PENDING',
+                downloadLink: null,
+                rejectedReleaseCount: 1,
+                activeDownloadName: 'Absolute Superman #6'
+            })
         }));
         // …and the release is blocked persistently, so the monitor's next (brand-new) request can't
         // pick the same NZB again.
@@ -396,9 +402,47 @@ describe('File System: Importer Engine', () => {
             data: expect.objectContaining({
                 releaseTitle: 'Absolute Superman 006 (2025) (Digital) (Shan-Empire) (cbz)',
                 downloadLink: 'nzb_abc',
+                metadataSource: 'COMICVINE',
                 volumeId: 'cv_160860'
             })
         }));
+        expect(omnibusQueue.add).toHaveBeenCalledWith(
+            'SEARCH_AND_DOWNLOAD',
+            expect.objectContaining({
+                requestId: 'req_1',
+                name: 'Absolute Superman #6',
+                year: '2025'
+            }),
+            expect.objectContaining({ jobId: expect.stringMatching(/^SEARCH_req_1_/) })
+        );
+        // An alert only follows once all three candidate releases are rejected.
+        expect(notifierSendAlert).not.toHaveBeenCalledWith('download_failed', expect.any(Object));
+
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    });
+
+    it('holds for review only after the third mismatched release', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING', rejectedReleaseCount: 2,
+            activeDownloadName: 'Absolute Superman 006 (2025) (Digital) (Other-Group) (cbz)',
+            downloadLink: 'nzb_other', volumeId: 'cv_160860', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Absolute Superman', publisher: 'DC Comics', year: 2025, libraryId: 'lib_1', isManga: false
+        });
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([
+            { name: '199808 Madman & The Jam 002.cbr', isDirectory: () => false }
+        ] as any);
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(false);
+        expect(mocks.updateRequest).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({ status: 'STALLED', rejectedReleaseCount: 3, downloadLink: null })
+        }));
+        expect(omnibusQueue.add).not.toHaveBeenCalled();
         expect(notifierSendAlert).toHaveBeenCalledWith('download_failed', expect.any(Object));
 
         vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
