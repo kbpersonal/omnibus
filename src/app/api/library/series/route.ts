@@ -222,6 +222,26 @@ export async function GET(request: Request) {
                 .map(async (i) => { try { await fs.promises.access(i.filePath!); existingPaths.add(i.filePath!); } catch { /* gone */ } })
         );
 
+        // "Scan Directory" is also the ownership reconciliation path used by the
+        // issue picker.  Previously it correctly showed a matched issue under
+        // `missingIssues`, but retained its filePath and DOWNLOADED status in the
+        // database.  Other views then still considered that issue owned and disabled
+        // Interactive Search.  Keep provider-backed issue metadata, but clear the
+        // stale on-disk claim exactly as the full Rust library scan does.
+        const staleMatchedIssueIds = existingIssues
+            .filter(i => i.filePath && !existingPaths.has(i.filePath) && i.metadataId && !i.metadataId.startsWith('unmatched_'))
+            .map(i => i.id);
+        if (staleMatchedIssueIds.length > 0) {
+            await prisma.issue.updateMany({
+                where: { id: { in: staleMatchedIssueIds } },
+                data: { filePath: null, status: 'WANTED' }
+            });
+            Logger.log(`[Scan] Cleared ${staleMatchedIssueIds.length} missing file record(s) from ${seriesRecord.name}.`, 'info');
+            // The response must reflect the repaired state too; callers refresh their
+            // ownership cache from this scan result.
+            existingIssues = await prisma.issue.findMany({ where: { seriesId: seriesRecord.id } });
+        }
+
         for (const issue of existingIssues) {
             const fileName = issue.filePath ? path.basename(issue.filePath) : null;
             const prog = fileName && progressMap[fileName] ? progressMap[fileName] : { readProgress: 0, isRead: false };
