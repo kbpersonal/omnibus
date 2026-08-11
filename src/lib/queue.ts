@@ -455,10 +455,18 @@ export function initWorker() {
                             // among them, hold it as MANUAL_DDL so the user gets a one-click manual download.
                             (async () => {
                                 for (const cand of candidates) {
-                                    await prisma.request.update({
+                                    // This work intentionally outlives the SEARCH_AND_DOWNLOAD job. An admin can
+                                    // delete the request while a slow hoster/Cloudflare attempt is still in flight;
+                                    // use an idempotent write so that expected cancellation ends the detached
+                                    // fallback instead of throwing Prisma's P2025 "record not found" error.
+                                    const claimed = await prisma.request.updateMany({
                                         where: { id: requestId },
                                         data: { status: 'DOWNLOADING', progress: 0, activeDownloadName: safeTitle, downloadLink: cand.url }
                                     });
+                                    if (claimed.count === 0) {
+                                        Logger.log(`[BullMQ] DDL fallback stopped for ${name}: request was deleted.`, 'info');
+                                        return;
+                                    }
                                     let ok = false;
                                     try {
                                         ok = await DownloadService.downloadDirectFile(cand.url, safeTitle, config.download_path, requestId, cand.hoster);
@@ -479,7 +487,14 @@ export function initWorker() {
                                 // holds the latter as MANUAL_DDL; this keeps the log accurate + is a backstop).
                                 const manualHold = candidates.find(c => /getcomics\.org\/dls\//i.test(c.url) || /\/md5\/[a-f0-9]{32}/i.test(c.url));
                                 if (manualHold) {
-                                    await prisma.request.update({ where: { id: requestId }, data: { status: 'MANUAL_DDL', downloadLink: manualHold.url, activeDownloadName: safeTitle } });
+                                    const held = await prisma.request.updateMany({
+                                        where: { id: requestId },
+                                        data: { status: 'MANUAL_DDL', downloadLink: manualHold.url, activeDownloadName: safeTitle }
+                                    });
+                                    if (held.count === 0) {
+                                        Logger.log(`[BullMQ] DDL fallback stopped for ${name}: request was deleted.`, 'info');
+                                        return;
+                                    }
                                     Logger.log(`[BullMQ] All hosters failed for ${name}; holding link for manual download.`, 'warn');
                                 } else {
                                     // Without this write the request stayed DOWNLOADING forever — invisible to
@@ -487,7 +502,14 @@ export function initWorker() {
                                     // and blocking the monitor's dedup from ever re-requesting the issue. Park
                                     // it STALLED: the cron retries the last link on its tight cadence, and the
                                     // monitor's dead-request sweep re-searches it once retries exhaust.
-                                    await prisma.request.update({ where: { id: requestId }, data: { status: 'STALLED', progress: 0 } });
+                                    const stalled = await prisma.request.updateMany({
+                                        where: { id: requestId },
+                                        data: { status: 'STALLED', progress: 0 }
+                                    });
+                                    if (stalled.count === 0) {
+                                        Logger.log(`[BullMQ] DDL fallback stopped for ${name}: request was deleted.`, 'info');
+                                        return;
+                                    }
                                     Logger.log(`[BullMQ] All ${candidates.length} hoster candidate(s) failed for ${name}. Marking STALLED for retry.`, 'error');
                                 }
                             })().catch((e: any) => Logger.log(`[BullMQ] Built-in DDL fallback crashed: ${e.message}`, 'error'));

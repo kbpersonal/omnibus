@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { initWorker } from '@/lib/queue';
 import { ENGINE_URL } from '@/lib/engine';
+import { loggerLog } from '../helpers/setup-global';
 
 // 1. Hoist our mocks
 const mocks = vi.hoisted(() => ({
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
     requestFindMany: vi.fn(),
     requestCreate: vi.fn(),
     requestUpdate: vi.fn(),
+    requestUpdateMany: vi.fn().mockResolvedValue({ count: 1 }),
     userFindFirst: vi.fn(),
     seriesFindFirst: vi.fn(),
     issueCount: vi.fn(),
@@ -48,7 +50,7 @@ vi.mock('@/lib/db', () => ({
         series: { findMany: mocks.seriesFindMany, findFirst: mocks.seriesFindFirst, update: mocks.seriesUpdate },
         issue: { findMany: mocks.issueFindMany, count: mocks.issueCount },
         user: { findMany: mocks.userFindMany, findFirst: mocks.userFindFirst },
-        request: { findUnique: mocks.requestFindUnique, findFirst: mocks.requestFindFirst, findMany: mocks.requestFindMany, create: mocks.requestCreate, update: mocks.requestUpdate },
+        request: { findUnique: mocks.requestFindUnique, findFirst: mocks.requestFindFirst, findMany: mocks.requestFindMany, create: mocks.requestCreate, update: mocks.requestUpdate, updateMany: mocks.requestUpdateMany },
         downloadClient: { findMany: mocks.downloadClientFindMany },
         digestHistory: {
             deleteMany: vi.fn(),
@@ -621,10 +623,47 @@ describe('Cron: BullMQ Worker Router', () => {
         // The hoster loop is detached — wait for it to park the request. The mediafire URL matches
         // neither manual-hold pattern, so the request must land STALLED (not stay DOWNLOADING).
         await vi.waitFor(() => {
-            expect(mocks.requestUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            expect(mocks.requestUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
                 where: { id: 'req_ddl' },
                 data: expect.objectContaining({ status: 'STALLED', progress: 0 })
             }));
         });
+    });
+
+    it('treats a request deleted during a detached DDL download as expected cancellation', async () => {
+        initWorker();
+        mocks.requestFindUnique.mockResolvedValue({ id: 'req_deleted', volumeId: '0', failedLinks: '[]' });
+        mocks.systemSettingFindMany.mockResolvedValue([]);
+        mocks.requestFindFirst.mockResolvedValue(null); // no duplicate download
+        mocks.downloadDirectFile.mockResolvedValue(false); // the in-flight hoster attempt fails after deletion
+        // The first conditional write claims the request before the download. The terminal write
+        // sees no row because an admin deleted it while that slow download was running.
+        mocks.requestUpdateMany
+            .mockResolvedValueOnce({ count: 1 })
+            .mockResolvedValueOnce({ count: 0 });
+        mocks.engineFetch.mockResolvedValueOnce({
+            ok: true, status: 200,
+            json: async () => ({
+                success: true,
+                best_match: { title: 'Dawnrunner #5', protocol: 'ddl', downloadUrl: 'https://getcomics.org/dls/x', indexer: 'getcomics_main' },
+                ddl_candidates: [{ url: 'https://getcomics.org/dls/x', hoster: 'getcomics_main' }]
+            })
+        });
+
+        await mocks.workerCb.current({
+            id: 'job_search_deleted_ddl',
+            data: { type: 'SEARCH_AND_DOWNLOAD', requestId: 'req_deleted', name: 'Dawnrunner #5', year: '2024', isManga: false, publisher: 'Dark Horse', skipIndexers: false },
+            updateProgress: vi.fn()
+        });
+
+        await vi.waitFor(() => expect(mocks.requestUpdateMany).toHaveBeenCalledTimes(2));
+        expect(mocks.requestUpdateMany).toHaveBeenLastCalledWith(expect.objectContaining({
+            where: { id: 'req_deleted' },
+            data: expect.objectContaining({ status: 'MANUAL_DDL' })
+        }));
+        expect(loggerLog).not.toHaveBeenCalledWith(
+            expect.stringContaining('Built-in DDL fallback crashed'),
+            'error'
+        );
     });
 });

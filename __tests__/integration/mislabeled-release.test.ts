@@ -179,4 +179,25 @@ describe('End to end: a correctly-labelled release containing the wrong comic', 
         expect(after?.downloadLink).toBeNull();
         expect(mocks.searchAndDownload).not.toHaveBeenCalled();
     }, 120000);
+
+    it('makes a terminal write for a deleted request a no-op', async () => {
+        // The detached DDL fallback uses this form after a slow hoster attempt. This is deliberately
+        // exercised against the real configured Prisma database (SQLite by default, loopback
+        // PostgreSQL when OMNIBUS_E2E_DATABASE_URL is supplied), not a mocked Prisma client.
+        const req = await prisma.request.create({
+            data: {
+                userId: 'user_1', volumeId: '160860', metadataSource: 'COMICVINE',
+                status: 'DOWNLOADING', activeDownloadName: 'Dawnrunner #5'
+            }
+        });
+
+        await prisma.request.delete({ where: { id: req.id } });
+        const result = await prisma.request.updateMany({
+            where: { id: req.id },
+            data: { status: 'MANUAL_DDL', progress: 0 }
+        });
+
+        expect(result.count).toBe(0);
+        expect(await prisma.request.findUnique({ where: { id: req.id } })).toBeNull();
+    }, 120000);
 });
