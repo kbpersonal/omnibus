@@ -175,12 +175,22 @@ export const DownloadService = {
         const addRes = await axios.post(`${cleanUrl}/api/v2/torrents/add`, form, {
           ...baseConfig, headers: { ...authHeaders, ...form.getHeaders() }
         });
-        // qBittorrent signals a rejected add with a 2xx response body (usually
-        // "Fails."). Axios therefore does not throw, and the old code marked the
-        // request DOWNLOADING even though qBit had accepted nothing.
-        const addBody = String(addRes.data ?? '').trim();
-        if (addBody !== 'Ok.') {
-          throw new Error(`qBittorrent add failed${addBody ? ` (response: ${addBody.slice(0, 200)})` : ' (empty response)'}`);
+        // qBittorrent signals a rejected add with a 2xx response body, so Axios
+        // does not throw. Older releases return "Ok." / "Fails.", while 5.2.3
+        // returns structured counts. Require an explicit accepted torrent in
+        // either shape before allowing the request to move to DOWNLOADING.
+        const addBody = typeof addRes.data === 'string' ? addRes.data.trim() : '';
+        const structuredResult = addRes.data && typeof addRes.data === 'object' && !Array.isArray(addRes.data)
+          ? addRes.data as { success_count?: unknown; pending_count?: unknown; failure_count?: unknown }
+          : null;
+        const structuredSucceeded = structuredResult
+          && Number(structuredResult.failure_count ?? 0) === 0
+          && Number(structuredResult.success_count ?? 0) + Number(structuredResult.pending_count ?? 0) > 0;
+        if (addBody !== 'Ok.' && !structuredSucceeded) {
+          const responseDetail = addBody || (() => {
+            try { return JSON.stringify(addRes.data).slice(0, 200); } catch { return String(addRes.data).slice(0, 200); }
+          })();
+          throw new Error(`qBittorrent add failed${responseDetail ? ` (response: ${responseDetail})` : ' (empty response)'}`);
         }
       }
       else if (client.type === 'deluge') {

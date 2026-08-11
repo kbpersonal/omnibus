@@ -186,6 +186,19 @@ describe('External Integrations: Download Clients (qBittorrent)', () => {
         expect(loggerLog).not.toHaveBeenCalledWith('[QBIT] SUCCESS: Added Saga #1', 'success');
     });
 
+    it('accepts qBittorrent 5.2.3\'s structured successful-add response', async () => {
+        const keyClient = { ...mockClient, apiKey: 'qbt_abcdefghijklmnopqrstuvwxyz12' };
+        mocks.axiosPost.mockResolvedValueOnce({
+            data: { added_torrent_ids: ['abcdef'], failure_count: 0, pending_count: 0, success_count: 1 }
+        });
+
+        await expect(
+            DownloadService.addDownload(keyClient, 'magnet:?xt=urn:btih:abcdef', 'Saga #2', 0, 0)
+        ).resolves.toEqual({ success: true });
+
+        expect(loggerLog).toHaveBeenCalledWith('[QBIT] SUCCESS: Added Saga #2', 'success');
+    });
+
     it('hands Prowlarr\'s magnet redirect directly to qBittorrent', async () => {
         const redirectError: any = new Error('Redirected request failed: Unsupported protocol magnet:');
         redirectError.request = {
