@@ -113,13 +113,17 @@ export const DownloadService = {
 
     try {
       let fileBuffer: Buffer | null = null;
+      // Prowlarr's download endpoint can redirect to a magnet URI. `follow-redirects`
+      // refuses to follow a non-HTTP redirect, so retain that final URI and give it
+      // directly to qBittorrent instead of sending qBit the intermediary HTTP URL.
+      let handoffUrl = downloadUrl;
       
       // --- THE FIX: Let Omnibus fetch the file into memory for ALL clients except magnets, so the
       // download client receives the .nzb/.torrent bytes instead of a URL it may not be able to reach.
       // NOTE: this is a plain fetch — it does NOT route through FlareSolverr (only the engine's
       // GetComics/Anna's fetch+stream paths do). A Cloudflare-fronted indexer link falls through to
       // the raw-URL hand-off below.
-      if (!downloadUrl.startsWith('magnet:')) {
+      if (!handoffUrl.startsWith('magnet:')) {
         try {
             // SSRF guard: indexer/scraped URLs are untrusted — never let Omnibus fetch an internal host, and
             // re-validate each redirect hop. On block/failure we fall through to handing the raw URL to the
@@ -143,7 +147,19 @@ export const DownloadService = {
             } else {
                 fileBuffer = candidate;
             }
-        } catch (err) { Logger.log(`[Proxy] File fetch skipped/failed (${getErrorMessage(err)}), using URL instead.`, 'info'); }
+        } catch (err: any) {
+            // Prowlarr returns a local /download URL for some torrent indexers. That
+            // endpoint redirects to magnet:, which neither Axios nor qBittorrent's
+            // HTTP downloader can follow. follow-redirects leaves the final Location
+            // on the current response even though it throws for the non-HTTP scheme.
+            const redirectLocation = err?.request?._currentRequest?.res?.headers?.location;
+            if (typeof redirectLocation === 'string' && redirectLocation.toLowerCase().startsWith('magnet:')) {
+                handoffUrl = redirectLocation;
+                Logger.log(`[Proxy] Indexer download for "${title}" resolved to a magnet URI; handing the magnet directly to the client.`, 'info');
+            } else {
+                Logger.log(`[Proxy] File fetch skipped/failed (${getErrorMessage(err)}), using URL instead.`, 'info');
+            }
+        }
       }
 
       if (client.type === 'qbit') {
@@ -151,14 +167,21 @@ export const DownloadService = {
         const authHeaders = await qbitAuthHeaders(client, cleanUrl, baseConfig.headers, baseConfig.timeout);
         const form = new FormData();
         if (fileBuffer) form.append('torrents', fileBuffer, 'comic.torrent');
-        else form.append('urls', downloadUrl);
+        else form.append('urls', handoffUrl);
         form.append('category', primaryCategory);
         if (seedTimeLimit > 0) form.append('seeding_time_limit', seedTimeLimit.toString());
         if (seedRatio > 0) form.append('ratio_limit', seedRatio.toString());
 
-        await axios.post(`${cleanUrl}/api/v2/torrents/add`, form, {
+        const addRes = await axios.post(`${cleanUrl}/api/v2/torrents/add`, form, {
           ...baseConfig, headers: { ...authHeaders, ...form.getHeaders() }
         });
+        // qBittorrent signals a rejected add with a 2xx response body (usually
+        // "Fails."). Axios therefore does not throw, and the old code marked the
+        // request DOWNLOADING even though qBit had accepted nothing.
+        const addBody = String(addRes.data ?? '').trim();
+        if (addBody !== 'Ok.') {
+          throw new Error(`qBittorrent add failed${addBody ? ` (response: ${addBody.slice(0, 200)})` : ' (empty response)'}`);
+        }
       }
       else if (client.type === 'deluge') {
         const authRes = await axios.post(`${cleanUrl}/json`, { method: "auth.login", params: [client.pass], id: 1 }, baseConfig);

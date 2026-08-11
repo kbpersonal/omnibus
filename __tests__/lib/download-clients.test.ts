@@ -174,6 +174,37 @@ describe('External Integrations: Download Clients (qBittorrent)', () => {
         expect(requestConfig.headers['Cookie']).toBeUndefined();
     });
 
+    it('rejects qBittorrent\'s HTTP-200 failed-add response instead of falsely marking the request DOWNLOADING', async () => {
+        const keyClient = { ...mockClient, apiKey: 'qbt_abcdefghijklmnopqrstuvwxyz12' };
+        mocks.axiosPost.mockResolvedValueOnce({ data: 'Fails.' });
+
+        await expect(
+            DownloadService.addDownload(keyClient, 'magnet:?xt=urn:btih:9', 'Saga #1', 0, 0)
+        ).rejects.toThrow('qBittorrent add failed (response: Fails.)');
+
+        expect(loggerLog).toHaveBeenCalledWith(expect.stringContaining('[Download Service] Failed: qBittorrent add failed'), 'error');
+        expect(loggerLog).not.toHaveBeenCalledWith('[QBIT] SUCCESS: Added Saga #1', 'success');
+    });
+
+    it('hands Prowlarr\'s magnet redirect directly to qBittorrent', async () => {
+        const redirectError: any = new Error('Redirected request failed: Unsupported protocol magnet:');
+        redirectError.request = {
+            _currentRequest: { res: { headers: { location: 'magnet:?xt=urn:btih:abcdef123&dn=Comic' } } }
+        };
+        mocks.axiosGet.mockRejectedValueOnce(redirectError);
+        mocks.axiosPost.mockResolvedValueOnce({ data: 'Ok.' });
+        const keyClient = { ...mockClient, apiKey: 'qbt_abcdefghijklmnopqrstuvwxyz12' };
+        const appendSpy = vi.spyOn(FormData.prototype, 'append');
+
+        await expect(
+            DownloadService.addDownload(keyClient, 'http://prowlarr:9696/download?id=123', 'Comic #1', 0, 0)
+        ).resolves.toEqual({ success: true });
+
+        expect(appendSpy).toHaveBeenCalledWith('urls', 'magnet:?xt=urn:btih:abcdef123&dn=Comic');
+        expect(loggerLog).toHaveBeenCalledWith(expect.stringContaining('resolved to a magnet URI'), 'info');
+        appendSpy.mockRestore();
+    });
+
     it('should gracefully handle the client being completely offline (Network Error)', async () => {
         mocks.axiosPost.mockRejectedValueOnce(new Error('ECONNREFUSED 192.168.1.100'));
 
