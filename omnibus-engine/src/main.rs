@@ -150,8 +150,10 @@ struct InteractiveResponse {
 
 /// Interactive search is a user-facing fan-out across sources with very different latency and
 /// failure modes. A solver-backed source must not hold the whole response open after the faster
-/// sources have results (or after the source itself has stopped responding).
-const INTERACTIVE_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+/// sources have results (or after the source itself has stopped responding). Keep this below the
+/// Ottawa gateway's 15-second upstream request deadline so a bounded source cannot still become a
+/// gateway 504 before the partial response is returned.
+const INTERACTIVE_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 async fn bounded_interactive_source<F>(
     source: &'static str,
