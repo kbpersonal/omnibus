@@ -148,6 +148,36 @@ struct InteractiveResponse {
     annas_archive: Vec<prowlarr::ProwlarrResult>,
 }
 
+/// Interactive search is a user-facing fan-out across sources with very different latency and
+/// failure modes. A solver-backed source must not hold the whole response open after the faster
+/// sources have results (or after the source itself has stopped responding).
+const INTERACTIVE_SOURCE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+async fn bounded_interactive_source<F>(
+    source: &'static str,
+    timeout: std::time::Duration,
+    future: F,
+) -> Vec<prowlarr::ProwlarrResult>
+where
+    F: std::future::Future<Output = Result<Vec<prowlarr::ProwlarrResult>, anyhow::Error>>,
+{
+    match tokio::time::timeout(timeout, future).await {
+        Ok(Ok(results)) => results,
+        Ok(Err(error)) => {
+            log::warn!("[Interactive] {} source failed: {}", source, error);
+            Vec::new()
+        }
+        Err(_) => {
+            log::warn!(
+                "[Interactive] {} source timed out after {}ms; returning partial results.",
+                source,
+                timeout.as_millis()
+            );
+            Vec::new()
+        }
+    }
+}
+
 struct AppState {
     // The runtime-selected (Postgres/SQLite) database — see src/db.rs.
     db: db::Db,
@@ -260,6 +290,59 @@ mod version_tests {
         // constant ack the Node health check treats as "handshake verified".
         let Json(v) = handle_auth_health().await;
         assert_eq!(v["ok"], true);
+    }
+}
+
+#[cfg(test)]
+mod interactive_search_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn timed_out_source_is_dropped_instead_of_holding_search_open() {
+        let started = std::time::Instant::now();
+        let results = bounded_interactive_source(
+            "test-source",
+            std::time::Duration::from_millis(5),
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                Ok::<Vec<prowlarr::ProwlarrResult>, anyhow::Error>(Vec::new())
+            },
+        )
+        .await;
+
+        assert!(results.is_empty());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn completed_source_results_are_preserved() {
+        let results = bounded_interactive_source(
+            "test-source",
+            std::time::Duration::from_secs(1),
+            async {
+                Ok::<Vec<prowlarr::ProwlarrResult>, anyhow::Error>(vec![
+                    prowlarr::ProwlarrResult {
+                        guid: "test-guid".into(),
+                        title: "Test result".into(),
+                        size: 1,
+                        indexer: "Test".into(),
+                        seeders: 1,
+                        peers: 1,
+                        info_url: "https://example.test/info".into(),
+                        download_url: "https://example.test/download".into(),
+                        protocol: "torrent".into(),
+                        publish_date: "2026-01-01".into(),
+                        info_hash: None,
+                        matched_query: None,
+                        query_rung: None,
+                    },
+                ])
+            },
+        )
+        .await;
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].guid, "test-guid");
     }
 }
 
@@ -1547,21 +1630,33 @@ async fn handle_interactive_search(
     let annas_enabled = annas_archive::is_interactive_enabled(&state.db.pool).await;
 
     let (prow_res, get_res, annas_res) = tokio::join!(
-        prowlarr::search(&state.db.pool, &state.limiter, &ladder, is_manga, false),
-        getcomics::search(&state.db.pool, &state.limiter, &queries, true, &payload.query, payload.year.as_deref(), payload.year.as_deref(), is_manga, None),
-        async {
-            if annas_enabled {
-                annas_archive::search(&state.db.pool, &state.limiter, &queries, true, is_manga).await
-            } else {
-                Ok(Vec::new())
-            }
-        }
+        bounded_interactive_source(
+            "Prowlarr",
+            INTERACTIVE_SOURCE_TIMEOUT,
+            prowlarr::search(&state.db.pool, &state.limiter, &ladder, is_manga, false),
+        ),
+        bounded_interactive_source(
+            "GetComics",
+            INTERACTIVE_SOURCE_TIMEOUT,
+            getcomics::search(&state.db.pool, &state.limiter, &queries, true, &payload.query, payload.year.as_deref(), payload.year.as_deref(), is_manga, None),
+        ),
+        bounded_interactive_source(
+            "Anna's Archive",
+            INTERACTIVE_SOURCE_TIMEOUT,
+            async {
+                if annas_enabled {
+                    annas_archive::search(&state.db.pool, &state.limiter, &queries, true, is_manga).await
+                } else {
+                    Ok(Vec::new())
+                }
+            },
+        )
     );
 
     Json(InteractiveResponse {
-        prowlarr: prow_res.unwrap_or_default(),
-        getcomics: get_res.unwrap_or_default(),
-        annas_archive: annas_res.unwrap_or_default(),
+        prowlarr: prow_res,
+        getcomics: get_res,
+        annas_archive: annas_res,
     })
 }
 
