@@ -26,12 +26,19 @@ export interface MetadataIssue {
     coverArtists?: string[];
     colorists?: string[];
     letterers?: string[];
+    inker?: string[];
+    editor?: string[];
+    translator?: string[];
     storyArcs?: string[];
     teams?: string[];
     locations?: string[];
     seriesId?: number | null;
     seriesName?: string | null;
     publisher?: string | null;
+    /** The RAW story title ("Lifedeath"), when the provider supplied a real one — `name` above
+     *  may be a display composite ("X-Men (1991) #154: Lifedeath"). Detail fetches only;
+     *  placeholder titles ("Issue 154") are dropped at the provider (#199 round 3). */
+    storyTitle?: string | null;
 }
 
 export interface IMetadataProvider {

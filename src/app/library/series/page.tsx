@@ -120,7 +120,9 @@ function SeriesContent() {
 
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [deleteFiles, setDeleteFiles] = useState(true);
+  // #200 follow-up (anacronismo): destructive file deletion is OPT-IN — removing a series from
+  // the library must not silently take the files with it. Matches the bulk-delete default.
+  const [deleteFiles, setDeleteFiles] = useState(false);
   const [isBulkDownloading, setIsBulkDownloading] = useState(false);
   const [seriesDownloadProgress, setSeriesDownloadProgress] = useState<number | null>(null);
 
@@ -128,7 +130,8 @@ function SeriesContent() {
   // Page Manager (issue #189): exploded page view for the selected issue, admin-only.
   const [pageManagerOpen, setPageManagerOpen] = useState(false);
   const [issueToDelete, setIssueToDelete] = useState<any>(null);
-  const [deleteIssueFile, setDeleteIssueFile] = useState(true);
+  // Same opt-in rule as the series delete above (#200 follow-up) — one control, one default.
+  const [deleteIssueFile, setDeleteIssueFile] = useState(false);
   const [isDeletingIssue, setIsDeletingIssue] = useState(false);
 
   const [isSelectionMode, setIsSelectionMode] = useState(false);
@@ -519,10 +522,13 @@ function SeriesContent() {
             toast({ title: "Requests not enabled", description: "Ask an admin to grant you the Request permission.", variant: "destructive" });
             return;
         }
-        let compositeName = `${seriesInfo.name} #${issue.parsedNum}`;
-        if (issue.name && issue.name !== seriesInfo.name && !issue.name.includes(`#${issue.parsedNum}`)) {
+        // Issue #200: parsedNum is NaN→null for anything parseFloat can't read (a "½" pre-fix, an
+        // "Annual" forever) — fall back to the raw stored number so a request never says "#null".
+        const reqNum = (issue.parsedNum ?? issue.number ?? '').toString();
+        let compositeName = `${seriesInfo.name} #${reqNum}`;
+        if (issue.name && issue.name !== seriesInfo.name && !issue.name.includes(`#${reqNum}`)) {
             compositeName += `: ${issue.name}`;
-        } else if (issue.name && issue.name.includes(`#${issue.parsedNum}`)) {
+        } else if (issue.name && issue.name.includes(`#${reqNum}`)) {
             compositeName = issue.name;
         }
 
@@ -538,7 +544,7 @@ function SeriesContent() {
                   year: seriesInfo.year || new Date().getFullYear().toString(),
                   publisher: seriesInfo.publisher || "Unknown",
                   image: issue.coverUrl || seriesInfo.cover,
-                  issueNumber: issue.parsedNum?.toString(),
+                  issueNumber: reqNum || undefined,
                   metadataSource: seriesInfo.metadataSource
               })
           });

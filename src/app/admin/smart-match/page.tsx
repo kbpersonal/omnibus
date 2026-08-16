@@ -16,8 +16,9 @@ import Link from "next/link"
 import { Logger } from "@/lib/logger"
 import { getErrorMessage } from "@/lib/utils/error"
 import { extractIssueNumber } from "@/lib/utils/issue-parser"
-import { buildManualSuggestion, cleanProviderId, findIssueIdByNumber } from "@/lib/utils/smart-match-search"
+import { buildManualSuggestion, buildKeepCarry, cleanProviderId, findIssueIdByNumber, resolveIssueIdByNumber } from "@/lib/utils/smart-match-search"
 import SmartMatchMetadataDialog, { type SmartMatchOverride, buildFolderPreview, shouldEmbedIssueCover, COMIC_INFO_DEFAULT_KEYS } from "@/components/smart-match-metadata-dialog"
+import SmartMatchBoundIssue from "@/components/smart-match-bound-issue"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
 
 // Auto-scan results (the ComicVine/Metron match suggestions) are kept in sessionStorage so a page
@@ -107,10 +108,40 @@ export default function SmartMatchPage() {
     const [manualMatchId, setManualMatchId] = useState("");
     // Shared by both paths: set while a picked result / entered ID is resolving its full details.
     const [isManualMatching, setIsManualMatching] = useState(false);
+    // #199 round 2: re-resolving the Exact Issue ID from an admin-corrected Issue Number (the auto
+    // cross-reference can bind the wrong issue within an otherwise-correct series match).
+    const [isReresolvingIssueId, setIsReresolvingIssueId] = useState(false);
 
     const [exactIssueId, setExactIssueId] = useState("");
     const [exactIssueNumber, setExactIssueNumber] = useState("");
     const [issueOverrides, setIssueOverrides] = useState<Record<string, { issueId: string, issueNumber: string, coverImageBase64?: string, coverFromArchive?: boolean }>>({});
+    // #199 round 4: per-item "local evidence" (ComicInfo.xml / series.json / scan-banked row),
+    // fetched lazily and cached for the session. null = fetched, nothing found.
+    const [prefills, setPrefills] = useState<Record<string, any>>({});
+    const prefillFetches = useRef<Record<string, Promise<any>>>({});
+    // One id-assist attempt per item per session — a failed lookup falls back to normal search
+    // without retry loops.
+    const attemptedIdAssist = useRef<Set<string>>(new Set());
+
+    const fetchPrefill = (item: any): Promise<any> => {
+        if (!item?.folderPath) return Promise.resolve(null);
+        if (item.id in prefills) return Promise.resolve(prefills[item.id]);
+        if (!prefillFetches.current[item.id]) {
+            prefillFetches.current[item.id] = (async () => {
+                try {
+                    const res = await fetch(`/api/admin/match-prefill?path=${encodeURIComponent(item.folderPath)}`);
+                    const data = await res.json().catch(() => null);
+                    const p = res.ok && data?.hasContent ? data.prefill : null;
+                    setPrefills(prev => ({ ...prev, [item.id]: p }));
+                    return p;
+                } catch {
+                    setPrefills(prev => ({ ...prev, [item.id]: null }));
+                    return null;
+                }
+            })();
+        }
+        return prefillFetches.current[item.id];
+    };
     // Issue #189 follow-up: whether picked issue covers are ALSO baked into the archive as page 0
     // on Accept (default on, remembered). One switch governs every cover picked on this page.
     const [embedIssueCovers, setEmbedIssueCovers] = useState(true);
@@ -421,10 +452,22 @@ export default function SmartMatchPage() {
     };
 
     // The exact single-accept payload, shared by the per-row accept, Accept Selected, and Accept
-    // All — so every path carries the same admin overrides and issue-exact fields.
-    const buildMatchPayload = (series: any, suggestion: any) => {
+    // All — so every path carries the same admin overrides and issue-exact fields. Async since
+    // #199 round 4 Beta B: keep-mode reads the item's local evidence at Accept time so curation
+    // carries (and locks) even when the admin never opened the editor.
+    const buildMatchPayload = async (series: any, suggestion: any) => {
         const issueOv = issueOverrides[series.id] || {};
         const meta = metadataOverrides[series.id];
+        const dataMode = meta?.dataMode ?? 'keep';
+        // Keep-mode auto-carry: no saved override → the files' CONTENT fields still land and lock.
+        // A saved override supersedes it entirely (the dialog seeded from the same prefill, so the
+        // admin's save already contains the files' values plus their edits). Replace mode never
+        // carries file data — that's its meaning.
+        const prefill = (!meta && dataMode === 'keep') ? await fetchPrefill(series).catch(() => null) : null;
+        const keepCarry = prefill ? buildKeepCarry(prefill) : null;
+        const issueTitle = series.isRawFile
+            ? (meta?.issueTitle ?? (dataMode === 'keep' ? (prefill?.issue?.title ?? undefined) : undefined))
+            : undefined;
         return {
             oldFolderPath: series.folderPath,
             cvId: suggestion.id,
@@ -448,7 +491,9 @@ export default function SmartMatchPage() {
                 // …but the B&W switch is two-way by design: false clears a mistaken Yes back to
                 // unset (the route stores null, never a false "No" claim).
                 blackAndWhite: !!meta.blackAndWhite,
-            } : {}),
+            } : (keepCarry ?? {})),
+            dataMode,
+            ...(issueTitle ? { issueTitle } : {}),
             exactIssueId: issueOv.issueId || undefined,
             exactIssueNumber: issueOv.issueNumber || undefined,
             issueCoverImageBase64: issueOv.coverImageBase64 || undefined,
@@ -466,7 +511,7 @@ export default function SmartMatchPage() {
             const res = await fetch('/api/library/match-series', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(buildMatchPayload(series, suggestion))
+                body: JSON.stringify(await buildMatchPayload(series, suggestion))
             });
 
             if (res.ok) {
@@ -547,7 +592,7 @@ export default function SmartMatchPage() {
                     const res = await fetch('/api/library/match-series/bulk', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ items: chunk.map(s => buildMatchPayload(s, suggestions[s.id])) })
+                        body: JSON.stringify({ items: await Promise.all(chunk.map(s => buildMatchPayload(s, suggestions[s.id]))) })
                     });
                     const data = await res.json().catch(() => ({}));
                     results = res.ok && Array.isArray(data.results)
@@ -621,16 +666,72 @@ export default function SmartMatchPage() {
 
                 setIssueOverrides(newOverrides);
                 toast({ title: "Series Selected", description: "Review the metadata and issue mappings, then click Apply Match." });
+                return suggestionData;
 
             } else {
                 throw new Error(data.error || "Couldn't load series details");
             }
         } catch (e: any) {
             toast({ title: "Lookup Failed", description: e.message, variant: "destructive" });
+            return null;
         } finally {
             setIsManualMatching(false);
         }
     };
+
+    // #199 round 4 id-assist: when the Search Match dialog opens for an item whose FILES carry a
+    // provider id (ComicInfo tags/Web/Notes, or series.json's comicid), jump straight to the exact
+    // lookup — the admin lands on the resolved series with the mapping (and, for a tagged loose
+    // file, the exact issue binding) already in place. Best-effort: any failure just leaves the
+    // normal search UI. One attempt per item; file evidence outranks the filename automap.
+    useEffect(() => {
+        const t = manualMatchTarget;
+        if (!manualMatchOpen || !t || manualMatchResult || isManualMatching || isBulkManualMatch) return;
+        const p = prefills[t.id];
+        if (!p?.ids || attemptedIdAssist.current.has(t.id)) return;
+        const volId = p.ids.cvVolumeId || p.ids.metronSeriesId;
+        const volProvider = p.ids.cvVolumeId ? 'COMICVINE' : 'METRON';
+        const issueId = p.ids.cvIssueId || p.ids.metronIssueId;
+        const issueProvider = p.ids.cvIssueId ? 'COMICVINE' : 'METRON';
+        if (!volId && !issueId) return;
+        attemptedIdAssist.current.add(t.id);
+        (async () => {
+            try {
+                let vid = volId ? String(volId) : '';
+                let provider = volId ? volProvider : issueProvider;
+                if (!vid && issueId) {
+                    // Only an issue id — one detail call resolves its volume, then the normal path runs.
+                    const r = await fetch(`/api/issue-details?id=${issueId}&type=issue&provider=${issueProvider}`);
+                    const d = await r.json().catch(() => null);
+                    if (r.ok && d?.volumeId) vid = String(d.volumeId);
+                }
+                if (!vid) return;
+                const result = await resolveVolumeSelection(vid, provider);
+                if (!result) return;
+                if (t.isRawFile) {
+                    const fileNum = (p.issue?.number || '').trim();
+                    const boundId = issueId ? String(issueId) : (fileNum ? findIssueIdByNumber(result.rawIssues, fileNum) : '');
+                    if (fileNum || boundId) {
+                        setIssueOverrides(prev => ({
+                            ...prev,
+                            [t.id]: {
+                                ...prev[t.id],
+                                issueNumber: fileNum || prev[t.id]?.issueNumber || '',
+                                issueId: boundId || prev[t.id]?.issueId || '',
+                            }
+                        }));
+                        if (fileNum) setExactIssueNumber(fileNum);
+                        if (boundId) setExactIssueId(boundId);
+                    }
+                }
+                toast({
+                    title: "Matched from your files",
+                    description: `${result.name} — resolved from the ${p.ids.cvVolumeId || p.ids.cvIssueId ? 'ComicVine' : 'Metron'} id in this item's own metadata. Verify and Apply.`,
+                });
+            } catch { /* best-effort: the search UI is still right there */ }
+        })();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [manualMatchOpen, manualMatchTarget, manualMatchResult, isManualMatching, isBulkManualMatch, prefills]);
 
     // PRIMARY: search the provider by series name — the same endpoint Fix Match and the request
     // flow already use — and let the admin pick from a list instead of hunting provider IDs.
@@ -667,6 +768,38 @@ export default function SmartMatchPage() {
     const handleSelectSearchResult = (item: any) => {
         if (isManualMatching) return;
         resolveVolumeSelection(String(item.id), item.metadataSource || searchProvider);
+    };
+
+    // #199 round 2: the admin corrected the Issue Number (right series, wrong issue bound) — look
+    // the exact issue ID back up from that number. The picked result's rawIssues are authoritative
+    // when present; an auto-scan-sourced match (no list) falls back to one volume-details fetch.
+    const handleReresolveIssueId = async () => {
+        if (!manualMatchTarget || !manualMatchResult) return;
+        const rawNumber = issueOverrides[manualMatchTarget.id]?.issueNumber ?? exactIssueNumber;
+        if (!rawNumber || !rawNumber.trim()) {
+            toast({ title: "Enter the issue number first", description: "Refresh looks up the exact issue using this number.", variant: "destructive" });
+            return;
+        }
+        setIsReresolvingIssueId(true);
+        try {
+            const newId = await resolveIssueIdByNumber({
+                issueNumber: rawNumber,
+                rawIssues: manualMatchResult.rawIssues,
+                seriesMetadataId: manualMatchResult.id,
+                provider: manualMatchResult.metadataSource || searchProvider,
+            });
+            if (!newId) {
+                toast({ title: "No matching issue found", description: `Couldn't find issue #${rawNumber} for this series on the provider.`, variant: "destructive" });
+                return;
+            }
+            setExactIssueId(newId);
+            setIssueOverrides(prev => ({ ...prev, [manualMatchTarget.id]: { ...prev[manualMatchTarget.id], issueId: newId } }));
+            toast({ title: "Issue ID updated", description: `Re-matched to issue #${rawNumber}.` });
+        } catch (e: any) {
+            toast({ title: "Couldn't re-resolve", description: e.message, variant: "destructive" });
+        } finally {
+            setIsReresolvingIssueId(false);
+        }
     };
 
     // ADVANCED fallback: the classic exact-provider-ID lookup, for admins who already have the id.
@@ -761,7 +894,10 @@ export default function SmartMatchPage() {
     };
 
     // Open the per-item metadata editor, seeding from the item's current suggestion / lookup result.
-    const openMetaEditor = (target: any, seedSource: any) => {
+    // Awaits the item's file-side prefill first (#199 round 4) so the dialog opens with the
+    // library's own metadata already in the fields — a local read, so the wait is imperceptible.
+    const openMetaEditor = async (target: any, seedSource: any) => {
+        await fetchPrefill(target).catch(() => null);
         setMetaEditorTarget(target);
         setMetaEditorSeed(seedSource ? {
             name: seedSource.name,
@@ -769,6 +905,13 @@ export default function SmartMatchPage() {
             publisher: seedSource.publisher,
             description: seedSource.description,
             image: seedSource.image,
+            // #199 round 2: carried so the dialog's own "Refresh from number" can re-resolve this
+            // issue's exact provider ID without a Search Match round-trip.
+            metadataId: seedSource.id,
+            metadataSource: seedSource.metadataSource || searchProvider,
+            // #199 round 4: the volume's aggregated credits ride the seed so the dialog's
+            // "fill empty fields from provider" always uses THIS item's match, never a stale one.
+            credits: seedSource.credits,
         } : null);
         setMetaEditorOpen(true);
     };
@@ -1056,6 +1199,10 @@ export default function SmartMatchPage() {
                                             setIdMatchOpen(false);
                                             setExactIssueId(issueOverrides[series.id]?.issueId || "");
                                             setExactIssueNumber(issueOverrides[series.id]?.issueNumber || "");
+                                            // #199 round 4: kick off the local-evidence read — if the
+                                            // files carry a provider id, the id-assist effect takes it
+                                            // from here and resolves the series without a search.
+                                            fetchPrefill(series);
                                         }}
                                     >
                                         <Search className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Search Match</span>
@@ -1361,7 +1508,7 @@ export default function SmartMatchPage() {
                                     <FileText className="w-4 h-4" /> Issue Mapping (Auto-Filled)
                                 </h4>
                                 <p className="text-xs text-muted-foreground leading-tight">
-                                    Omnibus has extracted the issue numbers and cross-referenced them with the API to auto-fill exact Issue IDs. You can manually correct these below before applying.
+                                    Omnibus has extracted the issue numbers and cross-referenced them with the API to auto-fill exact Issue IDs. You can manually correct these below before applying — got the right series but the wrong issue? Fix the Issue Number, then hit &quot;Refresh from number&quot; to re-resolve the exact ID.
                                 </p>
                                 
                                 {/* Single Match View */}
@@ -1381,7 +1528,19 @@ export default function SmartMatchPage() {
                                                 />
                                             </div>
                                             <div className="space-y-1">
-                                                <Label className="text-[11px] text-muted-foreground uppercase">Exact Issue ID</Label>
+                                                <div className="flex items-center justify-between">
+                                                    <Label className="text-[11px] text-muted-foreground uppercase">Exact Issue ID</Label>
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleReresolveIssueId}
+                                                        disabled={isReresolvingIssueId}
+                                                        className="text-[10px] font-bold text-primary hover:underline flex items-center gap-1 disabled:opacity-50"
+                                                        title="Wrong issue matched? Fix the Issue Number, then re-resolve the exact ID from it."
+                                                    >
+                                                        {isReresolvingIssueId ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                                                        Refresh from number
+                                                    </button>
+                                                </div>
                                                 <Input
                                                     placeholder="Optional"
                                                     value={issueOverrides[manualMatchTarget.id]?.issueId ?? exactIssueId}
@@ -1393,6 +1552,12 @@ export default function SmartMatchPage() {
                                                 />
                                             </div>
                                         </div>
+                                        {/* #199 round 3: the bound ID gets a face — title, cover, credits —
+                                            so the auto-map (or a refresh) can be verified before Accept. */}
+                                        <SmartMatchBoundIssue
+                                            issueId={issueOverrides[manualMatchTarget.id]?.issueId ?? exactIssueId}
+                                            provider={manualMatchResult?.metadataSource || searchProvider}
+                                        />
                                         <div className="space-y-1">
                                             <Label className="text-[11px] text-muted-foreground uppercase">Issue Cover (optional)</Label>
                                             <div className="flex items-center gap-3">
@@ -1501,6 +1666,29 @@ export default function SmartMatchPage() {
                 initialIssueCover={metaEditorTarget ? issueOverrides[metaEditorTarget.id]?.coverImageBase64 : undefined}
                 initialIssueCoverFromArchive={metaEditorTarget ? issueOverrides[metaEditorTarget.id]?.coverFromArchive : undefined}
                 onSave={handleMetaSave}
+                // #199 round 2 (loose files): the wrong issue can be bound within a correct series
+                // match — the dialog's General tab lets the admin fix the number and re-resolve the
+                // exact issue ID right there. Both stores stay in sync with the Issue Mapping picker.
+                issueNumber={metaEditorTarget?.isRawFile ? (issueOverrides[metaEditorTarget.id]?.issueNumber ?? extractIssueNumber(metaEditorTarget.name || '')) : undefined}
+                // #199 round 3: the bound-issue confirmation card inside the dialog reads the same
+                // per-item binding the Issue Mapping picker maintains, so all three stay in step.
+                issueId={metaEditorTarget?.isRawFile ? (issueOverrides[metaEditorTarget.id]?.issueId || undefined) : undefined}
+                onIssueNumberChange={(v) => {
+                    if (!metaEditorTarget) return;
+                    setExactIssueNumber(v);
+                    setIssueOverrides(prev => ({ ...prev, [metaEditorTarget.id]: { ...prev[metaEditorTarget.id], issueNumber: v } }));
+                }}
+                onIssueIdChange={(id) => {
+                    if (!metaEditorTarget) return;
+                    setExactIssueId(id);
+                    setIssueOverrides(prev => ({ ...prev, [metaEditorTarget.id]: { ...prev[metaEditorTarget.id], issueId: id } }));
+                }}
+                seriesMetadataId={metaEditorSeed?.metadataId}
+                metadataSource={metaEditorSeed?.metadataSource}
+                // #199 round 4: the library's own metadata seeds the fields (file-first), and the
+                // matched volume's credits back the explicit "fill empty fields" action.
+                prefill={metaEditorTarget ? (prefills[metaEditorTarget.id] || undefined) : undefined}
+                providerFields={metaEditorSeed?.credits ?? (metaEditorTarget ? suggestions[metaEditorTarget.id]?.credits : undefined)}
             />
 
             {/* --- PAGE PREVIEW DIALOG: flip through an unmatched file before matching it --- */}

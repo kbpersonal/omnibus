@@ -12,7 +12,7 @@
   [![Docker Image Size](https://img.shields.io/docker/image-size/hankscafe/omnibus/latest.svg?style=for-the-badge&logo=docker)](https://hub.docker.com/r/hankscafe/omnibus)
   [![License](https://img.shields.io/github/license/hankscafe/omnibus?style=for-the-badge&color=green)](https://github.com/hankscafe/omnibus/blob/main/LICENSE)
   [![GitHub Stars](https://img.shields.io/github/stars/hankscafe/omnibus?style=for-the-badge&logo=github&color=yellow)](https://github.com/hankscafe/omnibus/stargazers)
-  [![Discord](https://img.shields.io/discord/1483588541341503500?style=for-the-badge&logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/FBnzdBZP)
+  [![Discord](https://img.shields.io/discord/1483588541341503500?style=for-the-badge&logo=discord&logoColor=white&label=Discord&color=5865F2)](https://discord.gg/YDf9bqRgpQ)
 
 </div>
 
@@ -162,20 +162,6 @@ services:
       - /path/to/your/nas/config:/config
       - /path/to/your/nas/data:/data
 
-  # --- OPTIONAL: Cloudflare solver ---
-  # Lets Omnibus solve Cloudflare challenges on sites like GetComics automatically.
-  # Uncomment this service, then point the Cloudflare Solver URL in Omnibus settings
-  # at http://flaresolverr:8191. Byparr (ghcr.io/thephaseless/byparr) and Trawl
-  # (ghcr.io/germondai/trawl) are drop-in alternatives on the same port - pick the
-  # matching Solver Backend in Settings.
-  # flaresolverr:
-  #   image: ghcr.io/flaresolverr/flaresolverr:latest
-  #   container_name: flaresolverr
-  #   restart: unless-stopped
-  #   environment:
-  #     - TZ=America/New_York
-  #   # No ports needed: Omnibus reaches it over the internal Docker network.
-
   omnibus-redis:
     image: redis:alpine
     container_name: omnibus-redis
@@ -201,5 +187,5 @@ Omnibus' own upload limit is 2GB per file, adjustable with the `OMNIBUS_MAX_UPLO
 If you run into issues, have suggestions, or want to contribute, please join the community:
 
   * [**Report a Bug / Request a Feature**](https://github.com/hankscafe/omnibus/issues)
-  * [**Join the Discord**](https://discord.gg/FBnzdBZP)
+  * [**Join the Discord**](https://discord.gg/YDf9bqRgpQ)
   * **Pull requests welcome!** Community contributions are credited in the [Contributors section](https://github.com/hankscafe/omnibus#contributors) of the main README.

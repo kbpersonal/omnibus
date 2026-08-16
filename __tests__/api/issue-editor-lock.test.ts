@@ -198,3 +198,108 @@ describe('GET /api/library/issue — lock state exposure', () => {
         expect(json.hasCustomMetadata).toBe(true);
     });
 });
+
+describe('PATCH /api/library/issue - per-issue inker/editor/translator (#199 Call-3 Beta A)', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.getServerSession.mockResolvedValue({ user: { id: 'admin1', role: 'ADMIN' } });
+        mocks.settingFindUnique.mockResolvedValue({ key: 'metadata_write_comicinfo', value: 'true' });
+        mocks.issueFindUnique.mockResolvedValue({ ...row(), inker: null, editor: null, translator: null });
+        mocks.issueUpdate.mockResolvedValue({});
+    });
+
+    it('accepts the three new credit arrays and stores them as JSON', async () => {
+        const res = await PATCH(patchReq({
+            issueId: 'i1',
+            inker: ['Jonathan Glapion'],
+            editor: ['Devin Lewis'],
+            translator: ['Anna Rossi'],
+        }));
+        const data = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(data.changedFields).toEqual(expect.arrayContaining(['inker', 'editor', 'translator']));
+        expect(mocks.issueUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                inker: '["Jonathan Glapion"]',
+                editor: '["Devin Lewis"]',
+                translator: '["Anna Rossi"]',
+            }),
+        }));
+    });
+
+    it('leaves the new fields untouched when absent from a partial payload (reader-tagging contract)', async () => {
+        mocks.issueFindUnique.mockResolvedValue({ ...row(), inker: '["Kept Inker"]', editor: null, translator: null });
+        const res = await PATCH(patchReq({ issueId: 'i1', characters: ['Dylan Dog'] }));
+        const data = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(data.changedFields).toEqual(['characters']);
+        const written = mocks.issueUpdate.mock.calls[0][0].data;
+        expect(written).not.toHaveProperty('inker');
+        expect(written).not.toHaveProperty('editor');
+        expect(written).not.toHaveProperty('translator');
+    });
+});
+
+describe('PATCH /api/library/issue - per-issue ComicInfo remainder (#199 Call-3 Beta B)', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        mocks.getServerSession.mockResolvedValue({ user: { id: 'admin1', role: 'ADMIN' } });
+        mocks.settingFindUnique.mockResolvedValue({ key: 'metadata_write_comicinfo', value: 'true' });
+        mocks.issueFindUnique.mockResolvedValue({
+            ...row(), tags: null, mainCharacterOrTeam: null, alternateSeries: null, alternateNumber: null,
+            alternateCount: null, storyArcNumber: null, gtin: null, notes: null, scanInformation: null,
+            review: null, blackAndWhite: null, communityRating: null,
+        });
+        mocks.issueUpdate.mockResolvedValue({});
+    });
+
+    it('accepts the tags array, the string scalars, and the typed trio with validation', async () => {
+        const res = await PATCH(patchReq({
+            issueId: 'i1',
+            tags: ['noir', 'one-shot'],
+            alternateSeries: 'Legends of the Dark Knight',
+            alternateNumber: '19B',
+            gtin: '9791234567897',
+            communityRating: '9.9',   // clamped to 5
+            alternateCount: '6',      // parsed to int
+            blackAndWhite: false,     // an explicit per-issue "No" is a real stored claim
+        }));
+        const data = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(data.changedFields).toEqual(expect.arrayContaining([
+            'tags', 'alternateSeries', 'alternateNumber', 'gtin', 'communityRating', 'alternateCount', 'blackAndWhite',
+        ]));
+        expect(mocks.issueUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                tags: '["noir","one-shot"]',
+                alternateSeries: 'Legends of the Dark Knight',
+                alternateNumber: '19B',
+                gtin: '9791234567897',
+                communityRating: 5,
+                alternateCount: 6,
+                blackAndWhite: false,
+            }),
+        }));
+    });
+
+    it('treats absent Beta B fields as untouched and clears with explicit null', async () => {
+        mocks.issueFindUnique.mockResolvedValue({
+            ...row(), tags: '["kept"]', gtin: '111', blackAndWhite: true, communityRating: 4,
+            mainCharacterOrTeam: null, alternateSeries: null, alternateNumber: null,
+            alternateCount: null, storyArcNumber: null, notes: null, scanInformation: null, review: null,
+        });
+        const res = await PATCH(patchReq({ issueId: 'i1', blackAndWhite: null, communityRating: '' }));
+        const data = await res.json();
+
+        expect(res.status).toBe(200);
+        expect(data.changedFields).toEqual(expect.arrayContaining(['blackAndWhite', 'communityRating']));
+        const written = mocks.issueUpdate.mock.calls[0][0].data;
+        expect(written.blackAndWhite).toBeNull();
+        expect(written.communityRating).toBeNull();
+        expect(written).not.toHaveProperty('tags');
+        expect(written).not.toHaveProperty('gtin');
+    });
+});

@@ -41,6 +41,61 @@ describe('shouldEmbedIssueCover (#199 gate)', () => {
     });
 });
 
+describe('SmartMatchMetadataDialog keep/replace + issue title (#199 round 4 Beta B)', () => {
+    beforeEach(() => {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            blob: async () => new Blob([Uint8Array.from([1, 2, 3])], { type: 'image/jpeg' }),
+            json: async () => ({}),
+        }));
+    });
+
+    const prefill = {
+        fields: {
+            name: { value: 'Dylan Dog', source: 'comicinfo' },
+            writer: { value: 'Tiziano Sclavi', source: 'comicinfo' },
+        },
+        issue: { number: '1', title: "L'alba dei morti viventi" },
+    };
+    const seed = { name: 'Provider Name', year: 1986, publisher: 'Provider Pub', description: 'Provider desc' };
+
+    it('keep mode (default) seeds file-first and saves dataMode + the file-prefilled issue title', () => {
+        const onSave = vi.fn();
+        render(<SmartMatchMetadataDialog {...baseProps} seed={seed} prefill={prefill} onSave={onSave} />);
+
+        // The files outranked the provider suggestion in the fields…
+        expect(screen.getByDisplayValue('Dylan Dog')).toBeTruthy();
+        expect(screen.getByDisplayValue("L'alba dei morti viventi")).toBeTruthy();
+
+        fireEvent.click(screen.getByRole('button', { name: /save details/i }));
+        expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+            dataMode: 'keep',
+            issueTitle: "L'alba dei morti viventi",
+            name: 'Dylan Dog',
+            writer: 'Tiziano Sclavi',
+        }));
+    });
+
+    it('replace reseeds provider-fresh, discards file values, and saves dataMode replace', () => {
+        const onSave = vi.fn();
+        render(<SmartMatchMetadataDialog {...baseProps} seed={seed} prefill={prefill} onSave={onSave} />);
+
+        fireEvent.click(screen.getByRole('button', { name: /replace with provider data/i }));
+
+        // Provider values took the fields; the files' values are gone (that's what replace means).
+        expect(screen.getByDisplayValue('Provider Name')).toBeTruthy();
+        expect(screen.queryByDisplayValue('Dylan Dog')).toBeNull();
+        expect(screen.queryByDisplayValue("L'alba dei morti viventi")).toBeNull();
+
+        fireEvent.click(screen.getByRole('button', { name: /save details/i }));
+        const saved = onSave.mock.calls[0][0];
+        expect(saved.dataMode).toBe('replace');
+        expect(saved.issueTitle).toBeUndefined();
+        expect(saved.writer).toBeUndefined();
+        expect(saved.name).toBe('Provider Name');
+    });
+});
+
 describe('SmartMatchMetadataDialog issue-cover provenance (#199)', () => {
     beforeEach(() => {
         vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
@@ -199,5 +254,70 @@ describe('SmartMatchMetadataDialog ComicInfo defaults (#199)', () => {
         expect(override.writer).toBe('W. Riter');
         expect(override.imprint).toBe('Vertigo');
         expect(override.blackAndWhite).toBe(true);
+    });
+});
+
+describe('Refresh from number (#199 round 2: right series, wrong issue)', () => {
+    const refreshProps = {
+        ...baseProps,
+        onSave: vi.fn(),
+        issueNumber: '4',
+        seriesMetadataId: 16180,
+        metadataSource: 'METRON',
+    };
+
+    beforeEach(() => {
+        toast.mockClear();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+            ok: true,
+            json: async () => ({ issues: [{ id: '171947', issue_number: '154', name: 'Dragonero #154' }] }),
+            blob: async () => new Blob([Uint8Array.from([1, 2, 3])], { type: 'image/jpeg' }),
+        }));
+    });
+
+    it('shows the number field for loose files only, wired to the page', () => {
+        const onIssueNumberChange = vi.fn();
+        const { unmount } = render(<SmartMatchMetadataDialog {...refreshProps} onIssueNumberChange={onIssueNumberChange} />);
+        const input = screen.getByLabelText('Issue Number');
+        expect((input as HTMLInputElement).value).toBe('4');
+        fireEvent.change(input, { target: { value: '154' } });
+        expect(onIssueNumberChange).toHaveBeenCalledWith('154');
+        unmount();
+
+        render(<SmartMatchMetadataDialog {...refreshProps} showIssueCover={false} />);
+        expect(screen.queryByLabelText('Issue Number')).toBeNull();
+    });
+
+    it('re-resolves the exact issue id from the corrected number and reports it back', async () => {
+        const onIssueIdChange = vi.fn();
+        render(<SmartMatchMetadataDialog {...refreshProps} issueNumber="154" onIssueIdChange={onIssueIdChange} />);
+
+        fireEvent.click(screen.getByRole('button', { name: /refresh from number/i }));
+
+        await waitFor(() => expect(onIssueIdChange).toHaveBeenCalledWith('171947'));
+        expect(vi.mocked(fetch)).toHaveBeenCalledWith('/api/issue-details?id=16180&type=volume&provider=METRON');
+        expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Issue re-matched' }));
+    });
+
+    it('guards: blank number and unmatched series toast instead of fetching', async () => {
+        const onIssueIdChange = vi.fn();
+        const { unmount } = render(<SmartMatchMetadataDialog {...refreshProps} issueNumber="" onIssueIdChange={onIssueIdChange} />);
+        fireEvent.click(screen.getByRole('button', { name: /refresh from number/i }));
+        await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Enter the issue number first' })));
+        unmount();
+        toast.mockClear();
+
+        render(<SmartMatchMetadataDialog {...refreshProps} seriesMetadataId={undefined} onIssueIdChange={onIssueIdChange} />);
+        fireEvent.click(screen.getByRole('button', { name: /refresh from number/i }));
+        await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'No series match yet' })));
+        expect(onIssueIdChange).not.toHaveBeenCalled();
+    });
+
+    it('an unknown number reports honestly and leaves the binding untouched', async () => {
+        const onIssueIdChange = vi.fn();
+        render(<SmartMatchMetadataDialog {...refreshProps} issueNumber="999" onIssueIdChange={onIssueIdChange} />);
+        fireEvent.click(screen.getByRole('button', { name: /refresh from number/i }));
+        await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'No matching issue found' })));
+        expect(onIssueIdChange).not.toHaveBeenCalled();
     });
 });
