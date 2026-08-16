@@ -275,6 +275,24 @@ pub fn generate_search_queries(
     apply_issue_padding(final_queries, &search_name)
 }
 
+/// Adds the original request as a last-resort query without defeating pack prioritization.
+///
+/// Most generated queries normalize the request (for example, `Batman #5` becomes `Batman 5`),
+/// so the original form is often not already present. Automated GetComics search stops at the first
+/// query with a valid result; when packs are prioritized, the raw request must therefore be appended
+/// after the generated pack and fallback queries. Preserve the historical first-position behavior
+/// when pack prioritization is disabled.
+pub(crate) fn add_raw_query_fallback(queries: &mut Vec<String>, raw_query: &str, prioritize_packs: bool) {
+    if queries.iter().any(|q| q == raw_query) {
+        return;
+    }
+    if prioritize_packs {
+        queries.push(raw_query.to_string());
+    } else {
+        queries.insert(0, raw_query.to_string());
+    }
+}
+
 /// The requested issue as (bare, zero-padded-to-3) — e.g. ("3", "003") — but ONLY when the name carries
 /// an explicit issue marker (#/issue/chapter) and the number is 1–2 digits (so padding actually differs).
 /// Keying on the marker avoids ever mistaking a title number (Batman '89, Spider-Man 2099) for the issue.
@@ -596,6 +614,7 @@ pub async fn filter_and_score(
     series_year: Option<String>,
     skip_relevance: bool,
     allow_packs_override: Option<bool>,
+    prioritize_packs: bool,
 ) -> anyhow::Result<Option<ProwlarrResult>> {
 
     let junk_words_str = sqlx::query_scalar::<_, String>(r#"SELECT value FROM "SystemSetting" WHERE key = 'filter_junk_words'"#)
@@ -676,11 +695,12 @@ pub async fn filter_and_score(
 
     // The reverse-guard noise set now lives in reverse_noise_set() (shared with the GetComics filter).
 
-    // Evaluate each result: None = rejected; Some(year_unconfirmed) = kept, where `true` marks an
-    // undated release admitted only via the opt-in `prowlarr_accept_yearless` (issue #176 change B).
+    // Evaluate each result: None = rejected; Some((year_unconfirmed, is_pack)) = kept, where `true`
+    // for year_unconfirmed marks an undated release admitted only via the opt-in
+    // `prowlarr_accept_yearless` (issue #176 change B). The pack flag is retained for final ranking.
     // Unconfirmed survivors sort BELOW every dated candidate regardless of score, so an undated release
     // only ever auto-downloads when nothing dated exists.
-    let evaluate = |res: &ProwlarrResult| -> Option<bool> {
+    let evaluate = |res: &ProwlarrResult| -> Option<(bool, bool)> {
         let title_lower = res.title.to_lowercase();
         let is_ddl = res.protocol == "ddl";
 
@@ -688,12 +708,13 @@ pub async fn filter_and_score(
         for group in &exclude_groups { if title_lower.contains(group) { return None; } }
         if res.seeders == 0 && res.protocol != "usenet" && !is_ddl { return None; }
 
+        let is_pack = allow_bulk_packs && pack_terms.iter().any(|term| title_lower.contains(term));
+
         // Pre-filtered sources (GetComics, already validated per-query in getcomics::search) only get
         // the operator's junk/exclude lists + scoring — not this relevance filter, which is keyed on the
-        // merged target_query rather than the specific query that produced the result.
-        if skip_relevance { return Some(false); }
-
-        let is_pack = allow_bulk_packs && pack_terms.iter().any(|term| title_lower.contains(term));
+        // merged target_query rather than the specific query that produced the result. Keep the pack
+        // classification so pack prioritization can still apply to GetComics candidates.
+        if skip_relevance { return Some((false, is_pack)); }
 
         if req_num.is_some() && !is_looking_for_omnibus && !is_pack {
             let unexpected_tpb_terms: Vec<&&str> = tpb_terms.iter().filter(|t| !clean_original.contains(**t)).collect();
@@ -803,23 +824,30 @@ pub async fn filter_and_score(
             if !w.chars().all(char::is_numeric) && !title_lower.contains(w) { return None; }
         }
 
-        Some(year_unconfirmed)
+        Some((year_unconfirmed, is_pack))
     };
 
-    let mut kept: Vec<(ProwlarrResult, bool)> = Vec::new();
+    let mut kept: Vec<(ProwlarrResult, bool, bool)> = Vec::new();
     for res in results {
-        if let Some(unconfirmed) = evaluate(&res) {
-            kept.push((res, unconfirmed));
+        if let Some((unconfirmed, is_pack)) = evaluate(&res) {
+            kept.push((res, unconfirmed, is_pack));
         }
     }
 
     if kept.is_empty() { return Ok(None); }
 
-    // Tiered sort: year-confirmed (false) before unconfirmed (true), then score within each tier.
+    // Tiered sort: when enabled, valid packs first; then year-confirmed (false) before unconfirmed
+    // (true); then score within each tier. With pack prioritization off this preserves the previous
+    // year/score ordering.
     // With prowlarr_accept_yearless off no survivor is ever flagged, so this reduces to the original
     // pure score ordering — the default path is bit-for-bit the old behavior.
     kept.sort_by(|a, b| {
-        a.1.cmp(&b.1).then_with(|| {
+        let pack_order = if prioritize_packs {
+            b.2.cmp(&a.2)
+        } else {
+            std::cmp::Ordering::Equal
+        };
+        pack_order.then_with(|| a.1.cmp(&b.1)).then_with(|| {
             let score_a = calculate_score(&a.0, &scoring_rules);
             let score_b = calculate_score(&b.0, &scoring_rules);
             score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
@@ -1198,6 +1226,23 @@ mod tests {
         assert!(no_number.iter().any(|q| q == "Saga pack"));
     }
 
+    #[test]
+    fn raw_query_fallback_stays_after_prioritized_pack_queries() {
+        let ac = HashMap::new();
+        let mut prioritized = generate_search_queries("Batman #5", "2016", &ac, true, true);
+        add_raw_query_fallback(&mut prioritized, "Batman #5", true);
+
+        assert_eq!(prioritized.first().map(String::as_str), Some("Batman"));
+        assert_eq!(prioritized.last().map(String::as_str), Some("Batman #5"));
+        assert!(prioritized.iter().position(|q| q == "Batman collection").unwrap()
+            < prioritized.iter().position(|q| q == "Batman #5").unwrap());
+
+        // The non-prioritized path retains its historical raw-query placement.
+        let mut ordinary = generate_search_queries("Batman #5", "2016", &ac, false, true);
+        add_raw_query_fallback(&mut ordinary, "Batman #5", false);
+        assert_eq!(ordinary.first().map(String::as_str), Some("Batman #5"));
+    }
+
     // ---- Issue #176 characterization: query normalization ALREADY strips punctuation and the year is
     // never a hard query constraint (year-less variants are always emitted). These assert current
     // behavior on this branch (they pass without any change) — proving the "auto sends only the
@@ -1295,9 +1340,60 @@ mod tests {
     const DATED: &str = "Batman 89 Echoes 003 (2024) (Digital)";
     const WRONG_YEAR: &str = "Batman 89 Echoes 003 (1989) (Digital)";
 
-    async fn run_filter(pool: &sqlx::AnyPool, results: Vec<ProwlarrResult>) -> Option<ProwlarrResult> {
-        filter_and_score(pool, results, REQ, false, Some("2024".into()), None, false, Some(false))
+    async fn run_filter_with(
+        pool: &sqlx::AnyPool,
+        results: Vec<ProwlarrResult>,
+        target_query: &str,
+        req_year: Option<&str>,
+        series_year: Option<&str>,
+        allow_packs_override: Option<bool>,
+        prioritize_packs: bool,
+    ) -> Option<ProwlarrResult> {
+        filter_and_score(
+            pool,
+            results,
+            target_query,
+            false,
+            req_year.map(str::to_string),
+            series_year.map(str::to_string),
+            false,
+            allow_packs_override,
+            prioritize_packs,
+        )
             .await.unwrap()
+    }
+
+    async fn run_filter(pool: &sqlx::AnyPool, results: Vec<ProwlarrResult>) -> Option<ProwlarrResult> {
+        run_filter_with(pool, results, REQ, Some("2024"), None, Some(false), false).await
+    }
+
+    #[tokio::test]
+    async fn pack_priority_beats_a_higher_scoring_single_issue() {
+        let pool = mem_pool(&[("allow_bulk_packs", "true")]).await;
+        let pack = res_p("Batman Complete Collection (2011) (Digital).cbr", 1, 0, "torrent");
+        let single = res_p("Batman 5 (2012) (Digital).cbz", 100, 0, "torrent");
+
+        let ordinary = run_filter_with(
+            &pool,
+            vec![pack.clone(), single.clone()],
+            "Batman #5",
+            Some("2012"),
+            Some("2011"),
+            Some(true),
+            false,
+        ).await;
+        assert_eq!(ordinary.map(|r| r.title), Some(single.title.clone()));
+
+        let prioritized = run_filter_with(
+            &pool,
+            vec![pack.clone(), single],
+            "Batman #5",
+            Some("2012"),
+            Some("2011"),
+            Some(true),
+            true,
+        ).await;
+        assert_eq!(prioritized.map(|r| r.title), Some(pack.title));
     }
 
     // Characterization (current behavior, no setting): PG-7 hard-rejects an undated Prowlarr/Usenet

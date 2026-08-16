@@ -1357,9 +1357,7 @@ async fn handle_search(
     let year_str = req_year.clone().unwrap_or_default();
     let mut queries = search_engine::generate_search_queries(&payload.name, &year_str, &acronyms, prioritize_packs, use_packs);
 
-    if !queries.contains(&payload.name) {
-        queries.insert(0, payload.name.clone());
-    }
+    search_engine::add_raw_query_fallback(&mut queries, &payload.name, prioritize_packs);
 
     // Resolve the admin-configured source order (default: GetComics → Prowlarr; Anna's Archive opt-in).
     // skip_indexers (DDL-only requests) drops Prowlarr from the order.
@@ -1439,7 +1437,7 @@ async fn handle_search(
                 // GetComics results are already relevance-filtered in getcomics::search → operator
                 // junk/exclude lists + scoring only (skip_relevance = true).
                 if let Ok(Some(mut best_ddl)) = search_engine::filter_and_score(
-                    &state.db.pool, get_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), true, Some(use_packs)
+                    &state.db.pool, get_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), true, Some(use_packs), prioritize_packs
                 ).await {
                     // Resolve the article to concrete hoster links; scrape_deep_link drops disabled
                     // hosters, so an empty list means no enabled hoster can serve this match.
@@ -1484,7 +1482,7 @@ async fn handle_search(
                 if annas_res.is_empty() { continue; }
                 // Anna's Archive results aren't pre-filtered (unlike GetComics) → full relevance scoring.
                 if let Ok(Some(mut best_aa)) = search_engine::filter_and_score(
-                    &state.db.pool, annas_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), false, Some(use_packs)
+                    &state.db.pool, annas_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), false, Some(use_packs), prioritize_packs
                 ).await {
                     // The result's download_url is already the resolvable /md5/ link — emit one candidate
                     // tagged for the existing Node resolver (premium key → stream; keyless → MANUAL_DDL).
@@ -1498,7 +1496,7 @@ async fn handle_search(
             "prowlarr" => {
                 if prow_res.is_empty() { continue; }
                 if let Ok(Some(best_prow)) = search_engine::filter_and_score(
-                    &state.db.pool, prow_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), false, Some(use_packs)
+                    &state.db.pool, prow_res.clone(), &payload.name, is_manga, req_year.clone(), series_year.clone(), false, Some(use_packs), prioritize_packs
                 ).await {
                     log::info!("[Prowlarr] Matched an indexer release for {}.", payload.name);
                     best_match = Some(best_prow);
