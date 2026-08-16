@@ -31,9 +31,16 @@ should point at this fork and `upstream` at `hankscafe/omnibus`, so a plain `git
 upstream commits onto the fork's `main` by surprise.
 
 Pushing `main` builds `:latest` and `:v<package.json version>`, cuts a GitHub Release tagged
-`v<package.json version>`, and announces it to Discord. That tag shares upstream's namespace, so
-**bump `package.json` first** — reusing a version silently skips the release step and overwrites the
-existing image tag.
+`v<package.json version>`, and announces it to Discord. The fork uses a four-component build
+identifier tied to upstream: upstream `1.4.4` becomes `1.4.4.1`, then `1.4.4.2` for another fork
+build on the same upstream base. The third component changes only when a newer upstream release is
+merged. Do not flatten fork builds into `1.4.11`: that makes a fork build look newer than a future
+upstream `1.4.5` and prevents reliable update ordering.
+
+This format is deliberately not strict SemVer. Treat it as the fork's ordered build identifier and
+keep the value identical in `package.json`, `package-lock.json`, the Git tag, both GHCR image tags,
+and the pinned Ottawa manifest. The complete release and E2E promotion procedure is recorded in
+[ADR 0001](adr/0001-fork-build-and-promotion.md).
 
 `km-<upstream-version>-<n>` (`km` = killinit-manga) tags stay available for builds you want off the
 release path, for example `km-1.4.3-2`. A `km-*` tag publishes `type=sha` / `type=ref` images only:
