@@ -56,11 +56,13 @@ no `:latest`, no GitHub Release, no Discord announcement.
 
 ### Current upstream comparison
 
-As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`) and the fork is `26` commits
-ahead at `v1.4.4.4`. There is nothing to merge from upstream `main`. Upstream `origin/dev` has three
-unreleased v1.4.5 beta commits, but it is based on stock Omnibus and its diff removes the fork's
-Suwayomi integration, manga statuses, blocklist, and fork documentation. Wait for a stable upstream
-release and port its changes deliberately rather than merging that branch wholesale.
+As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`) and the deployed fork code is
+`v1.4.4.4` at `088fa08`, 26 commits ahead. The current `fork/main` is 27 commits ahead because it
+also contains the documentation-only follow-up `abd448d`; the Ottawa manifests still pin `088fa08`.
+There is nothing to merge from upstream `main`. Upstream `origin/dev` has three unreleased v1.4.5
+beta commits, but it is based on stock Omnibus and its diff removes the fork's Suwayomi integration,
+manga statuses, blocklist, and fork documentation. Wait for a stable upstream release and port its
+changes deliberately rather than merging that branch wholesale.
 
 ### Rebasing onto a new upstream release
 
