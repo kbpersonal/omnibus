@@ -2,6 +2,12 @@
 
 Local changes carried on top of upstream `hankscafe/omnibus` (GPL-3.0); this fork stays GPL.
 
+Current stack references:
+
+- [Stack evaluation](stack-evaluation.md) — evidence-backed current state, live checks, and open setup work.
+- [Zero-technical-user guide](user-guide-books-and-comics.md) — how people request and read comics, manga, ebooks, and audiobooks.
+- [ADR 0002: acquisition and reader boundaries](adr/0002-acquisition-and-reader-boundaries.md) — why each library tree has one writer and one reader.
+
 What the fork currently carries:
 
 - **Manga via Suwayomi** — per-user manga requests backed by

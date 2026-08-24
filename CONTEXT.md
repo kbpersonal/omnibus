@@ -19,3 +19,28 @@ _Avoid_: publish only, deploy only.
 **Old-scheme image**:
 An image tagged with the former three-component fork numbering, including the mistaken `v1.4.11` line. Old-scheme images are removed from GHCR after the new four-component build is validated.
 _Avoid_: historical image, current build.
+
+## Books and comics stack language
+
+**Acquirer**:
+A service that finds or receives content and writes it into a library-owned storage path.
+_Avoid_: Reader, server
+
+**Reader**:
+A service that presents a library to people and owns their reading or listening state.
+_Avoid_: Downloader, acquirer
+
+**Library tree**:
+A content directory with one designated acquirer and one designated reader, so two services never
+rename or index the same files as owners.
+_Avoid_: Shared write directory
+
+**Monitored manga**:
+A manga request accepted by Suwayomi, which keeps the series and future chapters updated; the
+request is fulfilled even though it has no final-download moment.
+_Avoid_: Completed manga download
+
+**Needs Source**:
+A manga request parked because no configured source produced one exact, unambiguous title match.
+It is an admin action item, not a failed comic download.
+_Avoid_: Failed manga, manual DDL

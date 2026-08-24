@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     downloadDirectFile: vi.fn(),
     importRequest: vi.fn(),
     scrapeDeepLinkViaEngine: vi.fn(),
+    searchAndDownload: vi.fn(),
     fetch: vi.fn(),
     log: vi.fn(),
 }));
@@ -29,6 +30,7 @@ vi.mock('@/lib/db', () => ({
 vi.mock('next-auth/jwt', () => ({ getToken: vi.fn().mockResolvedValue({ id: 'user_1', role: 'ADMIN' }) }));
 vi.mock('@/lib/download-clients', () => ({ DownloadService: { downloadDirectFile: mocks.downloadDirectFile } }));
 vi.mock('@/lib/importer', () => ({ Importer: { importRequest: mocks.importRequest } }));
+vi.mock('@/lib/automation', () => ({ searchAndDownload: mocks.searchAndDownload }));
 vi.mock('@/lib/queue', () => ({ omnibusQueue: { getJobs: vi.fn().mockResolvedValue([]) } }));
 vi.mock('@/lib/getcomics', () => ({
     enabledHostersFromSetting: vi.fn().mockReturnValue(['getcomics_direct', 'getcomics_main', 'mediafire']),
@@ -59,6 +61,7 @@ describe('API Route: Request Retry (engine recovery search)', () => {
         mocks.settingFindMany.mockResolvedValue([{ key: 'download_path', value: '/downloads' }]);
         mocks.settingFindUnique.mockResolvedValue(null); // ddl_enabled unset → enabled
         mocks.downloadDirectFile.mockResolvedValue(false);
+        mocks.searchAndDownload.mockResolvedValue(undefined);
         mocks.fetch.mockRejectedValue(new Error('engine unavailable'));
     });
 
@@ -110,5 +113,46 @@ describe('API Route: Request Retry (engine recovery search)', () => {
         const res = await retryRequest();
         expect(res.status).toBe(400);
         expect(mocks.downloadDirectFile).not.toHaveBeenCalled();
+    });
+
+    it('requeues a manga retry through the Suwayomi job path', async () => {
+        mocks.requestFindUnique.mockResolvedValue({
+            id: 'req_1',
+            userId: 'user_1',
+            status: 'NEEDS_SOURCE',
+            activeDownloadName: 'Chainsaw Man #1',
+            volumeId: 'manga-1',
+            metadataSource: 'METRON',
+            failedLinks: '[]',
+            downloadLink: null,
+        });
+        mocks.seriesFindFirst.mockResolvedValue({
+            name: 'Chainsaw Man',
+            year: 2018,
+            publisher: 'Shueisha',
+            isManga: true,
+        });
+
+        const res = await retryRequest();
+        const data = await res.json();
+
+        expect(data.success).toBe(true);
+        expect(mocks.searchAndDownload).toHaveBeenCalledWith(
+            'req_1',
+            'Chainsaw Man',
+            '2018',
+            'Shueisha',
+            true,
+            false,
+        );
+        expect(mocks.fetch).not.toHaveBeenCalled();
+        expect(mocks.downloadDirectFile).not.toHaveBeenCalled();
+        expect(mocks.requestUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                status: 'PENDING',
+                downloadLink: null,
+                failedLinks: '[]',
+            }),
+        }));
     });
 });

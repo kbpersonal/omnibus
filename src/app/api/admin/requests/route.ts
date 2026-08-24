@@ -62,6 +62,7 @@ export async function GET(request: Request) {
         status: req.status,
         progress: req.progress, 
         downloadLink: req.downloadLink,
+        indexer: req.indexer,
         imageUrl: req.imageUrl && req.imageUrl.startsWith('http') ? `/api/library/cover?path=${encodeURIComponent(req.imageUrl)}` : req.imageUrl,
         retryCount: req.retryCount || 0,
         rejectedReleaseCount: req.rejectedReleaseCount || 0

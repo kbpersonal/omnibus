@@ -7,6 +7,7 @@ import { Logger } from '@/lib/logger';
 import { enabledHostersFromSetting, scrapeDeepLinkViaEngine } from '@/lib/getcomics';
 import { Importer } from '@/lib/importer';
 import { omnibusQueue } from '@/lib/queue';
+import { searchAndDownload } from '@/lib/automation';
 import { ENGINE_URL, engineHeaders } from '@/lib/engine';
 import { getBlockedReleases } from '@/lib/utils/release-blocklist';
 
@@ -57,8 +58,9 @@ export async function POST(request: NextRequest) {
 
         let year = "";
         let isManga = false;
+        let series: { name: string; year: number; publisher: string | null; isManga: boolean } | null = null;
         if (req.volumeId && req.volumeId !== "0") {
-            const series = await prisma.series.findFirst({ 
+            series = await prisma.series.findFirst({
                 where: { metadataId: req.volumeId, metadataSource: req.metadataSource || 'COMICVINE' } 
             });
             if (series) {
@@ -73,6 +75,47 @@ export async function POST(request: NextRequest) {
         // Enabled hosters in priority order (migrates the legacy `getcomics` key → direct + main).
         const enabledHosters = enabledHostersFromSetting(config.hoster_priority);
         const hasEnabledHosters = enabledHosters.length > 0;
+
+        // Manga retries must return to the Suwayomi acquisition path. A NEEDS_SOURCE request has no
+        // direct download link by design, and sending it through the DDL recovery search would ask
+        // comic indexers for a scanlation release they cannot provide. Use the canonical Series name
+        // rather than the issue-specific request label (for example, "Chainsaw Man #1"), because the
+        // Suwayomi resolver intentionally requires an exact title match.
+        if (isManga) {
+            Logger.log(`[Retry] Re-queueing manga request "${series?.name || safeTitle}" through Suwayomi.`, 'info');
+            await prisma.request.update({
+                where: { id },
+                data: {
+                    status: 'PENDING',
+                    progress: 0,
+                    retryCount: 0,
+                    rejectedReleaseCount: 0,
+                    downloadLink: null,
+                    failedLinks: "[]",
+                    indexer: null,
+                }
+            });
+
+            try {
+                await searchAndDownload(
+                    id,
+                    series?.name || safeTitle,
+                    year,
+                    series?.publisher || 'Unknown',
+                    true,
+                    false,
+                );
+            } catch (e: any) {
+                const detail = `Could not queue manga retry: ${e?.message || String(e)}`;
+                await prisma.request.update({
+                    where: { id },
+                    data: { status: 'NEEDS_SOURCE', indexer: detail.slice(0, 500) },
+                }).catch(() => {});
+                throw e;
+            }
+
+            return NextResponse.json({ success: true, message: 'Manga retry queued through Suwayomi.' });
+        }
 
         // 0. Cloudflare-gated GetComics "main server" link (getcomics.org/dls/…). This is a direct
         // download endpoint, NOT an article page — re-scraping it for hoster buttons is pointless (it

@@ -502,7 +502,7 @@ const mappedRequests = requests.map(req => {
       return { ...req, status: liveStatus, progress: liveProgress };
   });
 
-  const pendingRequests = mappedRequests.filter(r => ['PENDING', 'MANUAL_DDL', 'DOWNLOADING', 'STALLED', 'FAILED', 'ERROR', 'IMPORTING'].includes(r.status));
+  const pendingRequests = mappedRequests.filter(r => ['PENDING', 'MANUAL_DDL', 'DOWNLOADING', 'STALLED', 'FAILED', 'ERROR', 'IMPORTING', 'NEEDS_SOURCE'].includes(r.status));
   const pendingApprovals = mappedRequests.filter(r => r.status === 'PENDING_APPROVAL');
 
   const activeList = torrents.filter(t => {
@@ -965,6 +965,11 @@ const mappedRequests = requests.map(req => {
                                         <Badge variant={req.status === 'MANUAL_DDL' ? 'destructive' : req.status === 'IMPORTING' ? 'secondary' : 'outline'} className={`text-[9px] uppercase font-black px-1.5 py-0 ${req.status === 'STALLED' ? 'border-orange-500 text-orange-600' : ''} ${isExhausted ? 'border-red-500 text-red-600' : ''} ${req.status === 'IMPORTING' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 border-blue-300' : ''}`}>
                                             {req.status === 'MANUAL_DDL' ? 'GETCOMICS' : req.status === 'IMPORTING' ? 'IMPORTING...' : req.status === 'MONITORED_SUWAYOMI' ? 'MONITORED' : req.status === 'NEEDS_SOURCE' ? 'NEEDS SOURCE' : req.status}
                                         </Badge>
+                                        {req.status === 'NEEDS_SOURCE' && (
+                                            <span className="text-amber-700 dark:text-amber-400 truncate max-w-[38rem]" title={req.indexer || undefined}>
+                                                {req.indexer || 'No configured manga source returned one exact match.'}
+                                            </span>
+                                        )}
                                         {req.status === 'STALLED' && (
                                             <Badge variant="outline" className="text-[9px] uppercase font-black px-1.5 py-0 border-blue-500 text-blue-600 bg-blue-50 dark:bg-blue-900/20">
                                                 Perform Interactive Search
@@ -1031,6 +1036,11 @@ const mappedRequests = requests.map(req => {
                                   {['STALLED', 'FAILED', 'ERROR'].includes(req.status) && (
                                       <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleRetryRequest(req.id); }} className="h-10 sm:h-8 text-xs font-bold text-primary border-primary/30 bg-primary/10 hover:bg-primary/20 flex-1 md:flex-none">
                                           <RefreshCw className="w-3 h-3 mr-1" /> Retry
+                                      </Button>
+                                  )}
+                                  {req.status === 'NEEDS_SOURCE' && (
+                                      <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); handleRetryRequest(req.id); }} className="h-10 sm:h-8 text-xs font-bold text-amber-700 border-amber-300 bg-amber-50 hover:bg-amber-100 dark:text-amber-400 dark:border-amber-800 dark:bg-amber-900/20 dark:hover:bg-amber-900/30 flex-1 md:flex-none">
+                                          <RefreshCw className="w-3 h-3 mr-1" /> Retry Source Search
                                       </Button>
                                   )}
                                   {req.status === 'STALLED' && (

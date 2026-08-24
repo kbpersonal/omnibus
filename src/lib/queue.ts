@@ -73,7 +73,30 @@ function isNewerVersion(latest: string, current: string): boolean {
  * Komga reading direction is applied separately, after Komga's scanner has picked the series up.
  */
 async function handleMangaRequest(requestId: string, name: string, year: string | number | null) {
-    Logger.log(`[Manga] Resolving "${name}" against configured Suwayomi sources...`, 'info');
+    // Request rows are issue-shaped (for example, "Chainsaw Man #1"), while Suwayomi source
+    // resolution needs the canonical series title. Recover it from the linked Series row whenever
+    // possible; the job's name remains the fallback for legacy/series-less requests.
+    let canonicalName = name;
+    let canonicalYear = year;
+    try {
+        const request = await prisma.request.findUnique({ where: { id: requestId } });
+        if (request?.volumeId && request.volumeId !== '0') {
+            const series = await prisma.series.findFirst({
+                where: {
+                    metadataId: request.volumeId,
+                    metadataSource: (request as any).metadataSource || 'COMICVINE',
+                },
+            });
+            if (series?.name) {
+                canonicalName = series.name;
+                canonicalYear = series.year != null ? String(series.year) : year;
+            }
+        }
+    } catch (e) {
+        Logger.log(`[Manga] Could not load canonical series title for ${requestId}; using queued name.`, 'debug');
+    }
+
+    Logger.log(`[Manga] Resolving "${canonicalName}" against configured Suwayomi sources...`, 'info');
 
     const fail = async (detail: string, level: 'warn' | 'error' = 'warn') => {
         Logger.log(`[Manga] ${detail}`, level);
@@ -98,12 +121,12 @@ async function handleMangaRequest(requestId: string, name: string, year: string 
         }
 
         // One AniList lookup shared by source resolution and the later reading-direction step.
-        const { media } = await resolveManga({ name, year });
+        const { media } = await resolveManga({ name: canonicalName, year: canonicalYear });
 
         const outcome = await resolveAndAdd(sources, {
             romaji: media?.titleRomaji,
             english: media?.titleEnglish,
-            fallback: name,
+            fallback: canonicalName,
         });
 
         if (!outcome.ok) {
@@ -126,7 +149,7 @@ async function handleMangaRequest(requestId: string, name: string, year: string 
             Logger.log(`[Manga] Reading direction not applied for "${outcome.manga.title}": ${getErrorMessage(e)}`, 'warn')
         );
     } catch (e) {
-        await fail(`Suwayomi request failed for "${name}": ${getErrorMessage(e)}`, 'error');
+        await fail(`Suwayomi request failed for "${canonicalName}": ${getErrorMessage(e)}`, 'error');
     }
 }
 

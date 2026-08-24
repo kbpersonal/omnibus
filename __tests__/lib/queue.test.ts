@@ -36,6 +36,12 @@ const mocks = vi.hoisted(() => ({
     workerCb: { current: null as any }
 }));
 
+const mangaMocks = vi.hoisted(() => ({
+    resolveAndAdd: vi.fn(),
+    resolveManga: vi.fn(),
+    applyReadingDirection: vi.fn(),
+}));
+
 // 2. Mock Dependencies
 vi.mock('@/lib/db', () => ({
     prisma: {
@@ -69,6 +75,12 @@ vi.mock('@/lib/api-client', () => ({
 vi.mock('@/lib/health-checker', () => ({ runSystemHealthCheck: mocks.runSystemHealthCheck }));
 vi.mock('@/lib/download-clients', () => ({ DownloadService: { addDownload: mocks.addDownload, downloadDirectFile: mocks.downloadDirectFile } }));
 vi.mock('@/lib/automation', () => ({ searchAndDownload: mocks.searchAndDownload }));
+vi.mock('@/lib/suwayomi', () => ({
+    SOURCE_PRIORITY_KEY: 'manga_source_priority',
+    resolveAndAdd: mangaMocks.resolveAndAdd,
+}));
+vi.mock('@/lib/komga', () => ({ applyReadingDirection: mangaMocks.applyReadingDirection }));
+vi.mock('@/lib/manga-detector', () => ({ resolveManga: mangaMocks.resolveManga }));
 
 // Mock the mailer for the digest
 vi.mock('@/lib/mailer', () => ({
@@ -653,6 +665,63 @@ describe('Cron: BullMQ Worker Router', () => {
                 data: expect.objectContaining({ status: 'STALLED', progress: 0 })
             }));
         });
+    });
+
+    it('resolves manga using the canonical Series title, not an issue-specific request label', async () => {
+        initWorker();
+        mocks.requestFindUnique.mockResolvedValue({
+            id: 'manga_req',
+            volumeId: 'manga-1',
+            metadataSource: 'METRON',
+            activeDownloadName: 'Chainsaw Man #1',
+        });
+        mocks.seriesFindFirst.mockResolvedValue({
+            name: 'Chainsaw Man',
+            year: 2018,
+            publisher: 'Shueisha',
+            isManga: true,
+        });
+        mocks.systemSettingFindUnique.mockResolvedValue({
+            value: JSON.stringify([{ id: 'source-1', displayName: 'Comix EN', enabled: true }]),
+        });
+        mangaMocks.resolveManga.mockResolvedValue({
+            media: {
+                titleRomaji: 'Chainsaw Man',
+                titleEnglish: 'Chainsaw Man',
+                countryOfOrigin: 'JP',
+            },
+        });
+        mangaMocks.resolveAndAdd.mockResolvedValue({
+            ok: true,
+            sourceId: 'source-1',
+            manga: { id: 42, title: 'Chainsaw Man' },
+            chaptersEnqueued: 1,
+        });
+        mangaMocks.applyReadingDirection.mockResolvedValue(undefined);
+
+        await mocks.workerCb.current({
+            id: 'job_manga',
+            data: {
+                type: 'SEARCH_AND_DOWNLOAD',
+                requestId: 'manga_req',
+                name: 'Chainsaw Man #1',
+                year: '2018',
+                isManga: true,
+                publisher: 'Shueisha',
+                skipIndexers: false,
+            },
+            updateProgress: vi.fn(),
+        });
+
+        expect(mangaMocks.resolveManga).toHaveBeenCalledWith({ name: 'Chainsaw Man', year: '2018' });
+        expect(mangaMocks.resolveAndAdd).toHaveBeenCalledWith(
+            expect.any(Array),
+            expect.objectContaining({ fallback: 'Chainsaw Man' }),
+        );
+        expect(mocks.requestUpdate).toHaveBeenCalledWith(expect.objectContaining({
+            where: { id: 'manga_req' },
+            data: expect.objectContaining({ status: 'MONITORED_SUWAYOMI' }),
+        }));
     });
 
     it('treats a request deleted during a detached DDL download as expected cancellation', async () => {

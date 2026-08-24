@@ -45,7 +45,7 @@ function RequestCard({
   const [isCancelling, setIsCancelling] = useState(false)
 
   // Enforce the rule that users can only cancel pre-processed or active items
-  const isCancellable = ['PENDING_APPROVAL', 'PENDING', 'DOWNLOADING', 'MANUAL_DDL', 'UNRELEASED', 'AWAITING_RELEASE'].includes(req.status);
+  const isCancellable = ['PENDING_APPROVAL', 'PENDING', 'DOWNLOADING', 'MANUAL_DDL', 'UNRELEASED', 'AWAITING_RELEASE', 'NEEDS_SOURCE'].includes(req.status);
 
   const handleShowDesc = async () => {
     if (showDesc) {
@@ -90,7 +90,7 @@ function RequestCard({
   }
 
   const displayName = (req.seriesName || "Unknown Request").replace(COMIC_EXT_REGEX, '');
-  const isCompleted = ['IMPORTED', 'COMPLETED'].includes(req.status);
+  const isCompleted = ['IMPORTED', 'COMPLETED', 'MONITORED_SUWAYOMI'].includes(req.status);
 
   // Parse Provider
   let provider = "Pending Search";
@@ -127,6 +127,8 @@ function RequestCard({
       provider = "Awaiting Approval";
   } else if (req.status === 'AWAITING_RELEASE') {
       provider = "Not on any source yet — retrying automatically";
+  } else if (req.status === 'NEEDS_SOURCE') {
+      provider = "An admin needs to configure or retry a manga source";
   } else if (['FAILED', 'ERROR', 'CANCELLED', 'STALLED'].includes(req.status)) {
       provider = "N/A";
   }
@@ -182,6 +184,11 @@ function RequestCard({
                         ) : (
                             desc
                         )}
+                    </div>
+                )}
+                {req.status === 'NEEDS_SOURCE' && (
+                    <div className="text-sm text-amber-800 dark:text-amber-300 leading-relaxed bg-amber-50 dark:bg-amber-900/20 p-4 rounded-md border border-amber-200 dark:border-amber-800 mt-2">
+                        This manga is paused because no configured source returned one exact match. An admin can add or reorder a source, then retry the source search.
                     </div>
                 )}
             </div>
@@ -342,6 +349,7 @@ export default function RequestsPage() {
           // chapters — so it belongs with the completed requests rather than only under All.
           if (activeTab === "COMPLETED") return ['IMPORTED', 'COMPLETED', 'MONITORED_SUWAYOMI'].includes(req.status);
           if (activeTab === "FAILED") return ['FAILED', 'STALLED', 'ERROR'].includes(req.status);
+          if (activeTab === "NEEDS_SOURCE") return req.status === 'NEEDS_SOURCE';
           if (activeTab === "CANCELLED") return req.status === 'CANCELLED';
           return true;
       });
@@ -354,7 +362,7 @@ export default function RequestsPage() {
   const paginatedRequests = filteredRequests.slice((page - 1) * limit, page * limit);
   
   // Calculate which of the currently visible requests are eligible for cancellation
-  const cancellableRequests = useMemo(() => paginatedRequests.filter(r => ['PENDING_APPROVAL', 'PENDING', 'DOWNLOADING', 'MANUAL_DDL', 'UNRELEASED', 'AWAITING_RELEASE'].includes(r.status)), [paginatedRequests]);
+  const cancellableRequests = useMemo(() => paginatedRequests.filter(r => ['PENDING_APPROVAL', 'PENDING', 'DOWNLOADING', 'MANUAL_DDL', 'UNRELEASED', 'AWAITING_RELEASE', 'NEEDS_SOURCE'].includes(r.status)), [paginatedRequests]);
 
   return (
     <div className="container mx-auto py-10 px-6 space-y-6 max-w-5xl transition-colors duration-300">
@@ -363,7 +371,7 @@ export default function RequestsPage() {
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-foreground">My Requests</h1>
           <p className="text-muted-foreground mt-1">
-            Track the status and history of your requested comics.
+            Track the status and history of your requested comics, manga, and books.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -404,6 +412,7 @@ export default function RequestsPage() {
             <TabsTrigger value="AWAITING" className="px-4 py-2">Awaiting</TabsTrigger>
             <TabsTrigger value="COMPLETED" className="px-4 py-2">Completed</TabsTrigger>
             <TabsTrigger value="FAILED" className="px-4 py-2">Failed</TabsTrigger>
+            <TabsTrigger value="NEEDS_SOURCE" className="px-4 py-2">Needs Source</TabsTrigger>
             <TabsTrigger value="CANCELLED" className="px-4 py-2">Cancelled</TabsTrigger>
         </TabsList>
       </Tabs>
