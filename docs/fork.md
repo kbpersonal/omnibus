@@ -4,9 +4,9 @@ Local changes carried on top of upstream `hankscafe/omnibus` (GPL-3.0); this for
 
 Current stack references:
 
-- [Stack evaluation](stack-evaluation.md) — evidence-backed current state, live checks, and open setup work.
+- [Stack evaluation](stack-evaluation.md) — evidence-backed current state, live checks, and follow-up limits.
 - [Zero-technical-user guide](user-guide-books-and-comics.md) — how people request and read comics, manga, ebooks, and audiobooks.
-- [ADR 0002: acquisition and reader boundaries](adr/0002-acquisition-and-reader-boundaries.md) — why each library tree has one writer and one reader.
+- [ADR 0002: acquisition and reader boundaries](adr/0002-acquisition-and-reader-boundaries.md) — why each library tree has one owner and one reader.
 
 What the fork currently carries:
 
@@ -56,13 +56,18 @@ no `:latest`, no GitHub Release, no Discord announcement.
 
 ### Current upstream comparison
 
-As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`) and the deployed fork code is
-`v1.4.4.4` at `088fa08`, 26 commits ahead. The current `fork/main` also contains documentation-only
-follow-ups beyond that deployed code; the Ottawa manifests still pin `088fa08`. There is nothing to
-merge from upstream `main`. Upstream `origin/dev` has three unreleased v1.4.5
-beta commits, but it is based on stock Omnibus and its diff removes the fork's Suwayomi integration,
-manga statuses, blocklist, and fork documentation. Wait for a stable upstream release and port its
-changes deliberately rather than merging that branch wholesale.
+As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`), the fork `main` is `f573552`
+(31 commits ahead), and the deployed fork code is `v1.4.4.4` at `088fa08`. The commits after the
+deployed code are documentation-only follow-ups, so the Ottawa manifests still pin `088fa08`. There
+are no upstream-main commits missing from the fork. Upstream `origin/dev` has three unreleased
+v1.4.5 beta commits. They include useful annual-numbering and dependency work, but the annual change
+overlaps fork-owned schema/importer/API files; merging the branch wholesale would also remove the
+fork's Suwayomi integration, manga statuses, blocklist, and fork documentation. Wait for a stable
+upstream release and port compatible changes deliberately after re-running the fork's tests. In
+particular, beta.001 introduces the annual-numbering schema and broad parser/reconciler changes,
+beta.003 depends on that schema to heal bare rows from ComicInfo, and beta.002 is a security-worthy
+dependency refresh that must be applied under the fork's four-component build version rather than
+merging its `1.4.5-beta.002` package version into the deployed line.
 
 ### Rebasing onto a new upstream release
 

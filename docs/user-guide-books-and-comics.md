@@ -19,7 +19,8 @@ sign-in cookie.
 
 For Komga, use the username and password from your Komga invite. If you signed in there through the
 browser first and do not know a password, set one in your Komga account settings. Phone and reading
-apps need that username and password.
+apps need that username and password. The audiobook library is already set up; you do not need to
+create one.
 
 ## Request a western comic
 
@@ -46,22 +47,24 @@ retry a manga source. You can leave the request there; the admin can resume it a
 1. Open Shelfmark and search for the book.
 2. Choose the ebook format you want and request/download it.
 3. Shelfmark places the download in the ebook drop area.
-4. BookOrbit checks the book details and normally imports it into the Books library automatically.
-   Open BookOrbit to read it.
+4. BookOrbit checks the book details and normally imports it into the Books library. Open BookOrbit
+   to read it.
 
-If the book does not appear, refresh BookOrbit after a few minutes. Some books need an administrator
-to confirm their details before they can be filed. If it still does not appear, tell an administrator
-the book title and that it is missing from BookOrbit. Do not request the same book repeatedly.
+If the book does not appear after a few minutes, an administrator may need to press BookOrbit's
+**Rescan** button and confirm the book details. Some books are not clear enough to file automatically.
+If it still does not appear, tell an administrator the book title and that it is missing from
+BookOrbit. Do not request the same book repeatedly.
 
 ## Request an audiobook
 
 1. Open Shelfmark and search for the book.
 2. Choose the audiobook result and request/download it.
-3. Shelfmark places it in the audiobook library area.
+3. Shelfmark places it in the audiobook library area and organizes new releases for Audiobookshelf.
 4. Open Audiobookshelf and refresh the library. The audiobook should appear with its chapters.
 
-The audiobook library must be set up by an administrator before the first audiobook can appear. If
-the app opens but shows no library, report that instead of making another request.
+If the app opens but shows no library, report that to an administrator instead of making another
+request. If the audiobook is not visible after a refresh, report the title and wait for an
+administrator to check it. Do not request the same audiobook repeatedly.
 
 ## Where to read on different devices
 

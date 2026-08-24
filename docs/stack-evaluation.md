@@ -12,14 +12,20 @@ promoted from commit `088fa08` and digest-pinned in the Ottawa manifests.
 - **Manga:** working end to end in production. A real `Look Back` request resolved through Comix
   (EN), enqueued two Suwayomi chapters, produced two CBZ files, triggered both watcher scans, and
   appeared in Komga with locked right-to-left reading direction.
-- **Ebooks:** the wiring is correct and Shelfmark has live destinations configured. BookOrbit has a
-  library and is scanning it, but there are currently no files or books to prove the final handoff.
-- **Audiobooks:** Shelfmark has a live audiobook destination, but Audiobookshelf currently has zero
-  libraries configured. The audiobook reader needs one library pointing at that destination before
-  this path can work.
+- **Ebooks:** working end to end, with an administrator action required for the tested CIFS case.
+  Shelfmark delivered a real `.mobi` to the drop folder; BookOrbit's supported administrator rescan
+  created the Book Dock record, fetched metadata, and the administrator finalized it into the Books
+  library. The drop folder is empty and the book is present at its final path. The CIFS watcher did
+  not notice the settled file by itself, and the 75% match stayed below the 85% auto-finalize
+  threshold, so this is not yet a hands-off automatic-import claim.
+- **Audiobooks:** working end to end. Audiobookshelf now has a library rooted at the configured
+  destination. A real 48-file audiobook reached that directory and was indexed; that first run
+  exposed a Shelfmark organization setting that was fixed live. A second release after the fix was
+  placed in an author/title folder and indexed. A new multi-file release after the fix is still a
+  useful follow-up test.
 
-This is an evaluation of the promoted build. The remaining gaps are content/setup tests for the
-ebook and audiobook rails, not missing Omnibus code.
+This is an evaluation of the promoted build. The remaining gaps are operational caveats and focused
+follow-up tests, not missing Omnibus code.
 
 ## Ownership model
 
@@ -36,13 +42,14 @@ second writer for one of these trees.
 
 ## Repository and deployment baseline
 
-- The deployed Omnibus code baseline is fork build `v1.4.4.4` (`088fa08`). The configured upstream
-  `origin/main` is `6c63779` (`v1.4.4`), with no upstream commits ahead of the fork; the code fork
-  is 26 commits ahead of that upstream. `fork/main` also contains documentation-only follow-ups
-  beyond the deployed code while the manifests still pin `088fa08`. `origin/dev` contains three
-  unreleased v1.4.5 beta commits, but taking that branch
-  wholesale would remove the fork’s manga path and fork documentation, so it is not a safe
-  production update.
+- The deployed Omnibus code baseline is fork build `v1.4.4.4` (`088fa08`). The current fork `main`
+  is `f573552`, 31 commits ahead of upstream `origin/main` `6c63779` (`v1.4.4`), with no upstream
+  `main` commits missing. The additional commits after `088fa08` are documentation-only; the
+  manifests still pin the tested build. Upstream `origin/dev` contains three unreleased v1.4.5
+  beta commits. Its annual-numbering work overlaps fork files and depends on a schema change, and
+  taking the branch wholesale would remove the fork's Suwayomi path and fork documentation. It was
+  therefore reviewed but not merged; wait for a stable upstream release and port compatible work
+  deliberately.
 - The audit baseline for `kubernetes-manifests` is `main` at `ec3bf9649`, equal to `origin/main`.
   The worktree is clean. The latest commit is the separate CLIProxy fallback promotion; it is
   deployed and does not change the books/comics stack.
@@ -121,7 +128,7 @@ Shelfmark is the downloader/request screen for both ebooks and audiobooks. Its l
 
 - ebook destination: `/media-share/bookorbit-bookdrop`
 - audiobook destination: `/media-share/audiobookshelf-audiobooks`
-- ebook organization: author/title folders
+- ebook organization: author/title (year) folders
 - audiobook organization: author/title/title folders
 - Prowlarr is the default release source for both types
 - qBittorrent categories are `books` and `audiobooks`
@@ -134,37 +141,63 @@ path, and browses `/media-share`. Its live PostgreSQL state has one watched `Boo
 library: Books
 root:    /media-share/bookorbit-books
 scan:    automatic every 300 seconds
-books:   0
-files:   0
+books:   1
+files:   1
 ```
 
-BookOrbit's Book Dock settings are also wired for unattended imports: metadata fetching is enabled,
+BookOrbit's Book Dock settings are wired for unattended imports: metadata fetching is enabled,
 auto-finalization is enabled at an 85% confidence threshold, and the destination is library 1/folder
 1 (`Books` → `/media-share/bookorbit-books`) using safe metadata merging. A high-confidence ebook
-should therefore move out of the drop folder and become a library book automatically; a low-confidence
-match should remain in Book Dock for an administrator to review.
+can therefore move out of the drop folder automatically; a lower-confidence match remains in Book Dock
+for an administrator to review.
 
-The drop folder and the BookOrbit library folder both exist and are empty. Six BookOrbit scan jobs
-have completed without errors and found zero candidates. The handoff is therefore configured but
-not content-tested. A real high-confidence ebook request is needed to verify the complete move and
-index path. BookOrbit's relevant local code suites pass 318 tests across 15 files, covering the
-Book Dock watcher, ingestion, metadata/finalization, work queue, and library scanner; that is code
-evidence, not a substitute for a real file crossing the live drop folder.
+The live test deliberately used the supported API because the drop path is a CIFS/SMB mount and the
+BookOrbit watcher uses Chokidar with `ignoreInitial:true`. The settled `.mobi` remained in
+`/media-share/bookorbit-bookdrop` until an administrator invoked Book Dock **Rescan**. BookOrbit then
+created the dock row, fetched metadata at 75% confidence, and produced a valid finalize preview.
+Because 75% is below the 85% automatic threshold, an administrator finalized the reviewed item. The
+drop folder is now empty and the database contains one `present` book and one `.mobi` file at:
+
+```text
+/media-share/bookorbit-books/Lyman Frank Baum/The Wonderful Wizard of Oz (2006)/The Wonderful Wizard of Oz (2006).mobi
+```
+
+The Book Dock is empty and six scheduled/watcher scan jobs completed without errors. Do not enable
+global `CHOKIDAR_USEPOLLING`: it would also poll a potentially large library tree. A narrow Book Dock
+watcher fix would belong in BookOrbit itself, outside this Omnibus fork. BookOrbit's relevant local
+code suites pass 318 tests across 15 files, covering the Book Dock watcher, ingestion,
+metadata/finalization, work queue, and library scanner; that is supporting code evidence, not a
+replacement for the live file handoff.
 
 ## Shelfmark → Audiobookshelf: audiobooks
 
-Shelfmark’s audiobook destination exists and is mounted by both applications. Audiobookshelf is
-healthy and its database is readable, but its live database contains three users and **zero libraries**,
-zero books, and zero podcasts. No audiobook can appear until an administrator creates an
-Audiobookshelf library rooted at:
+Shelfmark’s audiobook destination exists and is mounted by both applications. Its live settings use
+Prowlarr as the audiobook source, direct downloads, and:
+
+```text
+FILE_ORGANIZATION_AUDIOBOOK=organize
+TEMPLATE_AUDIOBOOK_ORGANIZE={Author}/{Title}/{Title}
+```
+
+Audiobookshelf is healthy and has one `Audiobooks` library rooted at:
 
 ```text
 /media-share/audiobookshelf-audiobooks
 ```
 
-That is an application setup task, not a Kubernetes change. Do it in Audiobookshelf’s Library
-settings, then request one audiobook in Shelfmark and confirm the resulting folder appears in the
-library. Do not point Audiobookshelf at Shelfmark’s ebook or BookOrbit directories.
+The first live release was Jim Dale's *Alice's Adventures in Wonderland*: Shelfmark completed it and
+copied 48 MP3 files into the destination. At that time the live organization mode was `rename`, so
+the files were flat and Audiobookshelf indexed 48 root-level items. The setting was changed to the
+recommended `organize` mode. A second real release, *Alice's Adventures in Wonderland and Through the
+Looking Glass*, then landed under its own author/title folder as one MP3, and Audiobookshelf indexed
+it. The current database has 49 items, zero missing items, and the library points at the correct
+root. The original 48 flat test files remain as test data; they should not be used as the model for
+new releases. A fresh multi-file release after the setting change should be used to confirm that all
+tracks stay together as one Audiobookshelf book.
+
+This is an application configuration state, not a Kubernetes change. Keep Audiobookshelf pointed only
+at `/media-share/audiobookshelf-audiobooks`; never point it at Shelfmark’s ebook drop or BookOrbit’s
+library.
 
 ## Access and client model
 
@@ -181,10 +214,14 @@ The full plain-language flow is in [User guide: books and comics](user-guide-boo
 
 ## Open validation items
 
-1. Test one ebook end to end and confirm BookOrbit’s book-drop import into `/media-share/bookorbit-books`.
-2. Create the Audiobookshelf library at the configured audiobook destination, then test one audiobook.
+1. Repeat an ebook with a high-confidence match and confirm whether an automatic CIFS import occurs;
+   otherwise retain the administrator-rescan instruction for this deployment.
+2. Run one fresh multi-file audiobook after the `organize` setting change and confirm Audiobookshelf
+   creates one book containing all tracks.
 3. Re-test the first Suwayomi source or move it below a responsive source if its WebView timeout persists.
 4. Run the full Omnibus suite after repairing the workstation's missing Prisma OpenSSL runtime. On
-   2026-08-24, the nine targeted fork test files passed 83 tests with four integration cases skipped;
-   the integration setup itself is blocked by the workstation's missing `libssl.so.1.1`, while the
-   Rust engine passed all 233 tests.
+   2026-08-24, the local Vitest run passed 847 tests and skipped six, with one integration suite
+   failing during Prisma setup because the workstation lacks `libssl.so.1.1`; the nine targeted fork
+   test files separately passed 83 tests with four integration cases skipped. The Rust engine passed
+   all 233 tests and Clippy completed cleanly. GitHub Actions also passed the web, engine, and image
+   build jobs for the deployed fork build.
