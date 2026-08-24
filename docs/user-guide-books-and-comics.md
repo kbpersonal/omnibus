@@ -46,10 +46,12 @@ retry a manga source. You can leave the request there; the admin can resume it a
 1. Open Shelfmark and search for the book.
 2. Choose the ebook format you want and request/download it.
 3. Shelfmark places the download in the ebook drop area.
-4. BookOrbit imports it into the Books library. Open BookOrbit to read it.
+4. BookOrbit checks the book details and normally imports it into the Books library automatically.
+   Open BookOrbit to read it.
 
-If the book does not appear, refresh BookOrbit after a few minutes. If it still does not appear, tell
-an administrator the book title and that it is missing from BookOrbit.
+If the book does not appear, refresh BookOrbit after a few minutes. Some books need an administrator
+to confirm their details before they can be filed. If it still does not appear, tell an administrator
+the book title and that it is missing from BookOrbit. Do not request the same book repeatedly.
 
 ## Request an audiobook
 

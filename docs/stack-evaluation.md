@@ -138,10 +138,16 @@ books:   0
 files:   0
 ```
 
+BookOrbit's Book Dock settings are also wired for unattended imports: metadata fetching is enabled,
+auto-finalization is enabled at an 85% confidence threshold, and the destination is library 1/folder
+1 (`Books` → `/media-share/bookorbit-books`) using safe metadata merging. A high-confidence ebook
+should therefore move out of the drop folder and become a library book automatically; a low-confidence
+match should remain in Book Dock for an administrator to review.
+
 The drop folder and the BookOrbit library folder both exist and are empty. Six BookOrbit scan jobs
 have completed without errors and found zero candidates. The handoff is therefore configured but
-not content-tested. A real ebook request is needed to verify that BookOrbit’s book dock moves the
-download from `bookorbit-bookdrop` into `bookorbit-books` and indexes it.
+not content-tested. A real high-confidence ebook request is needed to verify the complete move and
+index path.
 
 ## Shelfmark → Audiobookshelf: audiobooks
 
