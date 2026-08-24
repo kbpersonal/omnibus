@@ -32,9 +32,11 @@ acquiring new chapters forever, Komga serves it with the correct reading directi
 ## Branch and tag conventions
 
 **`main` on this fork is the development line, and it is what the cluster runs.** The manga work was
-merged into it and the `manga` topic branch has been deleted. Build new work on `main`; `origin`
-should point at this fork and `upstream` at `hankscafe/omnibus`, so a plain `git pull` never drags
-upstream commits onto the fork's `main` by surprise.
+merged into it and the `manga` topic branch has been deleted. Build new work on `main`. In the
+maintainer checkout, `origin` is the upstream `hankscafe/omnibus` repository and `fork` is the
+writable `kbpersonal/omnibus` repository; fetch `origin` for comparisons and push `fork main` for
+fork releases. Do not pull upstream directly into the deployed line without checking the fork
+features first.
 
 Pushing `main` builds `:latest` and `:v<package.json version>`, cuts a GitHub Release tagged
 `v<package.json version>`, and announces it to Discord. The fork uses a four-component build
@@ -51,6 +53,14 @@ and the pinned Ottawa manifest. The complete release and E2E promotion procedure
 `km-<upstream-version>-<n>` (`km` = killinit-manga) tags stay available for builds you want off the
 release path, for example `km-1.4.3-2`. A `km-*` tag publishes `type=sha` / `type=ref` images only:
 no `:latest`, no GitHub Release, no Discord announcement.
+
+### Current upstream comparison
+
+As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`) and the fork is `26` commits
+ahead at `v1.4.4.4`. There is nothing to merge from upstream `main`. Upstream `origin/dev` has three
+unreleased v1.4.5 beta commits, but it is based on stock Omnibus and its diff removes the fork's
+Suwayomi integration, manga statuses, blocklist, and fork documentation. Wait for a stable upstream
+release and port its changes deliberately rather than merging that branch wholesale.
 
 ### Rebasing onto a new upstream release
 

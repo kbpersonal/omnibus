@@ -2,24 +2,24 @@
 
 **Audit date:** 2026-08-24
 **Scope:** the `omnibus` fork and the Ottawa manifests that deploy it.
-**Live image:** `ghcr.io/kbpersonal/omnibus:v1.4.4.3` and its matching engine image.
+**Live image:** `ghcr.io/kbpersonal/omnibus:v1.4.4.4` and its matching engine image,
+promoted from commit `088fa08` and digest-pinned in the Ottawa manifests.
 
 ## Verdict
 
 - **Western comics:** working in production. Omnibus writes comics, Komga reads them, and the live
   Komga watcher has triggered successful scans for newly changed CBZ files.
-- **Manga:** the fork’s code path is internally covered and the live Suwayomi, Komga, and source
-  configuration are healthy. A real manga acquisition has not been completed yet because the live
-  manga directory is empty. The first configured source was slow during a read-only search, so the
-  ordered fallback is important.
+- **Manga:** working end to end in production. A real `Look Back` request resolved through Comix
+  (EN), enqueued two Suwayomi chapters, produced two CBZ files, triggered both watcher scans, and
+  appeared in Komga with locked right-to-left reading direction.
 - **Ebooks:** the wiring is correct and Shelfmark has live destinations configured. BookOrbit has a
   library and is scanning it, but there are currently no files or books to prove the final handoff.
 - **Audiobooks:** Shelfmark has a live audiobook destination, but Audiobookshelf currently has zero
   libraries configured. The audiobook reader needs one library pointing at that destination before
   this path can work.
 
-This is an evaluation, not a release promotion. The local fixes described below are not in the
-currently deployed `v1.4.4.3` image.
+This is an evaluation of the promoted build. The remaining gaps are content/setup tests for the
+ebook and audiobook rails, not missing Omnibus code.
 
 ## Ownership model
 
@@ -36,14 +36,18 @@ second writer for one of these trees.
 
 ## Repository and deployment baseline
 
-- The audit baseline for `omnibus` is `main` at fork build `v1.4.4.3` (`5431e21`). Its configured
-  `origin/main` has no commits ahead of the local fork; the local fork is 25 commits ahead of that
-  upstream, and `fork/main` points at the local fork HEAD.
-- The audit baseline for `kubernetes-manifests` is `main` at `53f96b1a6`, equal to `origin/main`.
-- This working session intentionally leaves the new fork code/docs and the pre-existing unrelated
-  CLIProxy manifest edits uncommitted for review.
+- The audit baseline for `omnibus` is `main` at fork build `v1.4.4.4` (`088fa08`). The configured
+  upstream `origin/main` is `6c63779` (`v1.4.4`), with no upstream commits ahead of the fork; the
+  fork is 26 commits ahead and `fork/main` points at the deployed fork HEAD. `origin/dev` contains
+  three unreleased v1.4.5 beta commits, but taking that branch wholesale would remove the fork’s
+  manga path and fork documentation, so it is not a safe production update.
+- The audit baseline for `kubernetes-manifests` is `main` at `ec3bf9649`, equal to `origin/main`.
+  The worktree is clean. The latest commit is the separate CLIProxy fallback promotion; it is
+  deployed and does not change the books/comics stack.
 - The six stack deployments—Omnibus, Suwayomi, Komga, Shelfmark, BookOrbit, and Audiobookshelf—are
-  ready in Ottawa. Suwayomi and Komga also have ready watcher sidecars.
+  1/1 ready in Ottawa. Suwayomi and Komga also have ready watcher sidecars. Suwayomi has one
+  historical container restart from seven days earlier, but is currently 2/2 ready with no active
+  failure.
 - Their HTTPRoutes report `Accepted=True` and `ResolvedRefs=True` for the private, tailnet, and
   public parents they use.
 - The live Omnibus setup endpoint reports `requiresSetup:false`. The live Omnibus/engine handshake,
@@ -83,13 +87,21 @@ The manga path deliberately avoids comic indexers:
    not erase it.
 
 Live configuration has manga requests enabled and seven ordered English sources: Comix, Mangadotnet,
-Atsumaru, Manga Ball, OniSaga, Aqua Manga, and MangaFire. Suwayomi reports 178 sources, 29 English
-sources, and a healthy GraphQL endpoint. The manga storage directory is currently empty, so the
-acquisition-to-reader handoff remains a human test step.
+Atsumaru, Manga Ball, OniSaga, Aqua Manga, and MangaFire. Suwayomi reports 178 sources and 29
+English sources. The first configured source resolved the live test title.
 
-A read-only `Chainsaw Man` search against the first configured source (`Comix EN`) timed out at its
-upstream WebView. The resolver is designed to continue to later sources; reorder the source after a
-real test if it remains slow or unhealthy.
+The live `Look Back` evidence is:
+
+- Omnibus logged a Comix (EN) match, two chapters enqueued, and `MONITORED_SUWAYOMI`.
+- Suwayomi database row `477` is `in_library=true` with two chapters; the shared manga tree has
+  two CBZ files.
+- The Suwayomi watcher waited for file settlement and triggered Komga scans for both files.
+- Komga reports series `Look Back` with two books and `readingDirection=RIGHT_TO_LEFT` with the
+  reading-direction lock enabled.
+
+An earlier read-only `Chainsaw Man` search against Comix (EN) timed out at that source's upstream
+WebView. The ordered resolver and fallback remain important; reorder Comix below a responsive source
+if that timeout recurs.
 
 ### Local fixes made during this audit
 
@@ -124,8 +136,8 @@ books:   0
 files:   0
 ```
 
-The drop folder and the BookOrbit library folder both exist and are empty. Five previous BookOrbit
-scans completed without errors and found zero candidates. The handoff is therefore configured but
+The drop folder and the BookOrbit library folder both exist and are empty. Six BookOrbit scan jobs
+have completed without errors and found zero candidates. The handoff is therefore configured but
 not content-tested. A real ebook request is needed to verify that BookOrbit’s book dock moves the
 download from `bookorbit-bookdrop` into `bookorbit-books` and indexes it.
 
@@ -159,10 +171,10 @@ The full plain-language flow is in [User guide: books and comics](user-guide-boo
 
 ## Open validation items
 
-1. Promote a build containing the local manga retry/title and UI fixes, then perform one real manga
-   request and confirm a CBZ appears in Suwayomi’s directory and then in Komga.
-2. Test one ebook end to end and confirm BookOrbit’s book-drop import into `/media-share/bookorbit-books`.
-3. Create the Audiobookshelf library at the configured audiobook destination, then test one audiobook.
-4. Re-test the first Suwayomi source or move it below a responsive source if its WebView timeout persists.
-5. `npm test` previously hung after reporting the skipped integration suite and was stopped; targeted
-   manga, queue, and retry suites pass. The full-suite open-handle issue still needs separate diagnosis.
+1. Test one ebook end to end and confirm BookOrbit’s book-drop import into `/media-share/bookorbit-books`.
+2. Create the Audiobookshelf library at the configured audiobook destination, then test one audiobook.
+3. Re-test the first Suwayomi source or move it below a responsive source if its WebView timeout persists.
+4. Run the full Omnibus suite after repairing the workstation's missing Prisma OpenSSL runtime. On
+   2026-08-24, the nine targeted fork test files passed 83 tests with four integration cases skipped;
+   the integration setup itself is blocked by the workstation's missing `libssl.so.1.1`, while the
+   Rust engine passed all 233 tests.
