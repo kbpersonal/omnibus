@@ -50,9 +50,9 @@ second writer for one of these trees.
   taking the branch wholesale would remove the fork's Suwayomi path and fork documentation. It was
   therefore reviewed but not merged; wait for a stable upstream release and port compatible work
   deliberately.
-- The audit baseline for `kubernetes-manifests` is `main` at `ec3bf9649`, equal to `origin/main`.
-  The worktree is clean. The latest commit is the separate CLIProxy fallback promotion; it is
-  deployed and does not change the books/comics stack.
+- The audit baseline for `kubernetes-manifests` is clean `main` at `01b9f7638`, equal to
+  `origin/main`. The latest commit authorizes extracted Bhaiya MCP edge providers; it is unrelated
+  to the books/comics stack. The deployed Omnibus pin remains `v1.4.4.4` at `088fa08`.
 - The six stack deployments—Omnibus, Suwayomi, Komga, Shelfmark, BookOrbit, and Audiobookshelf—are
   1/1 ready in Ottawa. Suwayomi and Komga also have ready watcher sidecars. Suwayomi has one
   historical container restart from seven days earlier, but is currently 2/2 ready with no active
