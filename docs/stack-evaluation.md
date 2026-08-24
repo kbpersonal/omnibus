@@ -147,7 +147,9 @@ match should remain in Book Dock for an administrator to review.
 The drop folder and the BookOrbit library folder both exist and are empty. Six BookOrbit scan jobs
 have completed without errors and found zero candidates. The handoff is therefore configured but
 not content-tested. A real high-confidence ebook request is needed to verify the complete move and
-index path.
+index path. BookOrbit's relevant local code suites pass 318 tests across 15 files, covering the
+Book Dock watcher, ingestion, metadata/finalization, work queue, and library scanner; that is code
+evidence, not a substitute for a real file crossing the live drop folder.
 
 ## Shelfmark → Audiobookshelf: audiobooks
 
