@@ -38,9 +38,9 @@ second writer for one of these trees.
 
 - The deployed Omnibus code baseline is fork build `v1.4.4.4` (`088fa08`). The configured upstream
   `origin/main` is `6c63779` (`v1.4.4`), with no upstream commits ahead of the fork; the code fork
-  is 26 commits ahead of that upstream. `fork/main` now also contains the documentation-only
-  follow-up `abd448d`, so the current branch is 27 commits ahead while the manifests still pin
-  `088fa08`. `origin/dev` contains three unreleased v1.4.5 beta commits, but taking that branch
+  is 26 commits ahead of that upstream. `fork/main` also contains documentation-only follow-ups
+  beyond the deployed code while the manifests still pin `088fa08`. `origin/dev` contains three
+  unreleased v1.4.5 beta commits, but taking that branch
   wholesale would remove the fork’s manga path and fork documentation, so it is not a safe
   production update.
 - The audit baseline for `kubernetes-manifests` is `main` at `ec3bf9649`, equal to `origin/main`.
