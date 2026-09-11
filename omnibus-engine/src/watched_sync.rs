@@ -23,6 +23,9 @@ struct ComicInfo {
     day: Option<i32>,
     #[serde(default)]
     volume: Option<String>,
+    // #203: <Format> is one of the annual-domain signals (annual_flag_for_signals).
+    #[serde(default)]
+    format: Option<String>,
     publisher: Option<String>,
     manga: Option<String>,
     #[serde(default)]
@@ -193,6 +196,14 @@ pub async fn process_watched_folder(db: Db) -> Result<(i32, i32, String)> {
                 .unwrap_or(0);
             let year_str = if year != 0 { year.to_string() } else { String::new() };
             let issue_num = info.number.clone().unwrap_or_else(|| "1".to_string());
+            // #203: annual domain flag from the file's own signals (Format / Number shape / the
+            // ORIGINAL filename — checked before any rename). The number keeps its ComicInfo-only
+            // contract above; the flag rides beside it into dedupe + the row.
+            let is_annual = crate::scanner::annual_flag_for_signals(
+                info.format.as_deref(),
+                info.number.as_deref(),
+                &path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
+            );
             
             let manga_str = info.manga.as_deref().unwrap_or("").to_lowercase();
             let mut is_manga = manga_str == "yes" || manga_str == "yesandrighttoleft";
@@ -320,7 +331,17 @@ pub async fn process_watched_folder(db: Db) -> Result<(i32, i32, String)> {
             let _ = std::fs::create_dir_all(&dest_folder);
 
             let formatted_num = if issue_num.len() == 1 { format!("0{}", issue_num) } else { issue_num.clone() };
-            let pattern_to_use = if is_manga { &manga_file_pattern } else { &file_pattern };
+            // #203 Phase 1: an annual arriving through the watched folder is named the Mylar way
+            // ("Batman Annual #001 (2012)") — parity with renamer.rs and the Node importer, so a
+            // file lands under the same name whichever door it came through.
+            let annual_pattern = "{Series} Annual #{Issue} ({IssueYear})".to_string();
+            let pattern_to_use = if is_annual {
+                &annual_pattern
+            } else if is_manga {
+                &manga_file_pattern
+            } else {
+                &file_pattern
+            };
             
             let new_filename = clean_naming_leftovers(&pattern_to_use
                 .replace("{Publisher}", &clean_fs_name(&publisher))
@@ -423,9 +444,10 @@ pub async fn process_watched_folder(db: Db) -> Result<(i32, i32, String)> {
                 let page_count = tokio::task::spawn_blocking(move || crate::converter::count_zip_pages(&count_path))
                     .await.ok().flatten().unwrap_or(0);
 
-                // Dedupe: update an existing issue with the same number instead of inserting a duplicate.
+                // Dedupe: update an existing issue with the same number — in the same annual
+                // domain (#203) — instead of inserting a duplicate.
                 let existing_issue_id: Option<String> = sqlx::query(
-                    r#"SELECT id, number FROM "Issue" WHERE "seriesId" = $1"#,
+                    r#"SELECT id, number, CAST("isAnnual" AS INTEGER) AS is_annual FROM "Issue" WHERE "seriesId" = $1"#,
                 )
                 .bind(&series_id)
                 .fetch_all(&db.pool)
@@ -434,7 +456,8 @@ pub async fn process_watched_folder(db: Db) -> Result<(i32, i32, String)> {
                 .iter()
                 .find_map(|r| {
                     let n: String = r.get("number");
-                    if crate::metadata::is_same_issue(&n, &issue_num) { Some(r.get::<String, _>("id")) } else { None }
+                    let row_annual = r.try_get::<i64, _>("is_annual").map(|v| v != 0).unwrap_or(false);
+                    if row_annual == is_annual && crate::metadata::is_same_issue(&n, &issue_num) { Some(r.get::<String, _>("id")) } else { None }
                 });
 
                 let res = if let Some(eid) = existing_issue_id {
@@ -466,8 +489,10 @@ pub async fn process_watched_folder(db: Db) -> Result<(i32, i32, String)> {
                     .execute(&db.pool).await
                 } else {
                     sqlx::query(&format!(
-                        r#"INSERT INTO "Issue" (id, "seriesId", number, status, "filePath", name, description, writers, artists, characters, "matchState", "metadataId", "metadataSource", "pageCount", "releaseDate", "createdAt")
-                           VALUES ($1, $2, $3, 'DOWNLOADED', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, {now})"#,
+                        // isAnnual as a SQL literal — the Any-driver bool rule (#203).
+                        r#"INSERT INTO "Issue" (id, "seriesId", number, "isAnnual", status, "filePath", name, description, writers, artists, characters, "matchState", "metadataId", "metadataSource", "pageCount", "releaseDate", "createdAt")
+                           VALUES ($1, $2, $3, {annual}, 'DOWNLOADED', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, {now})"#,
+                        annual = if is_annual { "true" } else { "false" },
                         now = db.now_expr()
                     ))
                     .bind(&issue_id).bind(&series_id).bind(&issue_num).bind(&file_path_str)

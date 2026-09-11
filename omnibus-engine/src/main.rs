@@ -3,6 +3,7 @@ mod converter;
 mod db;
 mod scanner;
 mod metadata;
+mod attached_volumes;
 mod prowlarr;
 mod search_engine;
 mod getcomics;
@@ -590,6 +591,7 @@ async fn run(db_url: String, db_connections: u32) -> anyhow::Result<()> {
         .route("/api/metadata/sync", post(handle_metadata_sync))
         .route("/api/metadata/embed", post(handle_metadata_embed))
         .route("/api/metadata/export-series-json", post(handle_export_series_json))
+        .route("/api/metadata/attach-sync", post(handle_attach_sync))
         .route("/api/discover/sync", post(handle_discover_sync))
         .route("/api/monitor/sync", post(handle_monitor_sync))
         .route("/api/download/stream", post(handle_download_stream))
@@ -1114,6 +1116,10 @@ struct BulkRenameRequest {
     /// Manga series use this template when present (worklist item 8); absent = comic pattern for all.
     #[serde(default)]
     manga_file_pattern: Option<String>,
+    /// #203 COLLECTED: attached collected editions (TPBs, omnibuses) use this template; absent =
+    /// the built-in default. Configurable because TPB conventions vary far more than annuals do.
+    #[serde(default)]
+    collected_file_pattern: Option<String>,
 }
 
 /// Bulk rename / standardize, ported from the Node route. Runs SYNCHRONOUSLY (Node calls it via
@@ -1127,7 +1133,7 @@ async fn handle_bulk_rename(
     if req.series_ids.is_empty() || req.folder_pattern.trim().is_empty() || req.file_pattern.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    match renamer::run_bulk_rename(&state.db, &req.series_ids, &req.folder_pattern, &req.file_pattern, req.manga_file_pattern.as_deref()).await {
+    match renamer::run_bulk_rename(&state.db, &req.series_ids, &req.folder_pattern, &req.file_pattern, req.manga_file_pattern.as_deref(), req.collected_file_pattern.as_deref()).await {
         Ok(summary) => Ok(Json(serde_json::json!({
             "filesRenamed": summary.files_renamed,
             "foldersRenamed": summary.folders_renamed,
@@ -1415,6 +1421,22 @@ async fn handle_export_series_json(
     let (exported, total) = metadata_writer::run_series_json_export(&state.db, payload.series_ids).await;
     log::info!("series.json export complete. Wrote {} of {} series folders.", exported, total);
     Json(serde_json::json!({ "exported": exported, "total": total }))
+}
+
+/// #203 Phase 1: import/refresh an attached volume's issues. SYNCHRONOUS on purpose — the attach
+/// dialog reports what the pass actually did ("claimed N · created M · K unclaimed"), so the route
+/// waits for the numbers instead of firing a background job and guessing.
+async fn handle_attach_sync(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<attached_volumes::AttachSyncRequest>,
+) -> Json<serde_json::Value> {
+    match attached_volumes::sync_request(&state.db, payload).await {
+        Ok(summaries) => Json(serde_json::json!({ "ok": true, "results": summaries })),
+        Err(e) => {
+            log::error!("❌ Attached-volume sync failed: {:?}", e);
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() }))
+        }
+    }
 }
 
 async fn handle_search(

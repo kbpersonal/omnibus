@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
     findManyLibraries: vi.fn(),
     findFirstSeries: vi.fn(),
     findFirstClient: vi.fn(),
+    findManyIssues: vi.fn().mockResolvedValue([]),
     getAllActiveDownloads: vi.fn(),
     updateRequest: vi.fn(),
     createIssue: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock('@/lib/db', () => ({
         systemSetting: { findMany: mocks.findManySettings, findUnique: vi.fn().mockResolvedValue(null) },
         library: { findMany: mocks.findManyLibraries },
         series: { findFirst: mocks.findFirstSeries, upsert: mocks.upsertSeries, update: vi.fn() },
-        issue: { create: mocks.createIssue, findFirst: vi.fn(), update: vi.fn(), findMany: vi.fn().mockResolvedValue([]) },
+        issue: { create: mocks.createIssue, findFirst: vi.fn(), update: vi.fn(), findMany: mocks.findManyIssues },
         downloadClient: { findFirst: mocks.findFirstClient },
         releaseBlocklist: { findFirst: mocks.findFirstBlocklist, create: mocks.createBlocklist, findMany: vi.fn().mockResolvedValue([]) }
     }
@@ -444,6 +445,35 @@ describe('File System: Importer Engine', () => {
         }));
         expect(omnibusQueue.add).not.toHaveBeenCalled();
         expect(notifierSendAlert).toHaveBeenCalledWith('download_failed', expect.any(Object));
+
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    });
+
+    it('does not let a same-number regular issue validate an annual payload', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING',
+            activeDownloadName: 'Superman Annual 001 (2024) (Digital).cbz',
+            downloadLink: 'nzb_annual', volumeId: 'cv_160860', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Batman', publisher: 'DC Comics', year: 2024, libraryId: 'lib_1', isManga: false
+        });
+        mocks.findManyIssues.mockResolvedValueOnce([
+            { number: '1', isAnnual: false }
+        ]);
+        vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => true, size: 1000000 } as any);
+        vi.mocked(fs.promises.readdir).mockResolvedValue([
+            { name: 'Batman Annual 001.cbz', isDirectory: () => false }
+        ] as any);
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(false);
+        expect(mocks.createBlocklist).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({ releaseTitle: 'Superman Annual 001 (2024) (Digital).cbz' })
+        }));
+        expect(fs.copy).not.toHaveBeenCalled();
 
         vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
         vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);

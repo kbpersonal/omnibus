@@ -10,7 +10,7 @@ import { SystemNotifier } from './notifications';
 import { syncSeriesMetadata } from './metadata-fetcher'; 
 import { detectManga } from './manga-detector';
 import AdmZip from 'adm-zip';
-import { isSameIssue, extractIssueNumber } from '@/lib/utils/issue-parser';
+import { isSameIssue, extractIssueNumber, annualFlagForSignals } from '@/lib/utils/issue-parser';
 import { STOP_WORDS } from '@/lib/utils/search-terms';
 import { COMIC_EXTENSIONS, COMIC_EXT_REGEX, IMAGE_EXT_REGEX } from '@/lib/utils/formats';
 import { sanitizeFilename as sanitize } from '@/lib/utils/sanitize';
@@ -670,8 +670,13 @@ export const Importer = {
         // Signal 2 — the LABEL doesn't match and the issue it parses to isn't one this volume has.
         if (seriesNameMissing) {
             const parsedIssue = extractIssueNumber(payloadName);
+            const parsedIsAnnual = annualFlagForSignals(null, null, payloadName);
             const knownIssues = await prisma.issue.findMany({ where: { seriesId: series.id } });
-            const issueInVolume = knownIssues.some((i: any) => isSameIssue(i.number, parsedIssue));
+            // Annuals and regular issues have separate numbering domains. A same-number row in the
+            // other domain must not make a mislabeled payload look valid and bypass blocklisting.
+            const issueInVolume = knownIssues.some((i: any) =>
+                Boolean(i.isAnnual) === parsedIsAnnual && isSameIssue(i.number, parsedIssue)
+            );
 
             if (knownIssues.length > 0 && !issueInVolume) {
                 return await rejectImport(
@@ -809,7 +814,12 @@ export const Importer = {
     }
     
     const issueYearFromMeta = xmlMeta?.year ? xmlMeta.year.toString() : seriesYearFromMeta.toString();
-    const filePatToUse = isManga ? mangaFilePattern : filePattern;
+    // #203 Phase 1: an imported annual lands under the Mylar-shaped name (engine parity:
+    // renamer.rs / watched_sync.rs) so it reads correctly beside the main run from the first write.
+    const isAnnualImport = annualFlagForSignals(xmlMeta?.format, xmlMeta?.number, rawFileName);
+    const filePatToUse = isAnnualImport
+        ? "{Series} Annual #{Issue} ({IssueYear})"
+        : (isManga ? mangaFilePattern : filePattern);
     
     const issueTitle = xmlMeta?.title || "";
     const universeName = xmlMeta?.universe || "";
@@ -928,7 +938,10 @@ export const Importer = {
       if (series?.id) {
          let issueNum = extractIssueNumber(fileName);
          if (xmlMeta?.number) issueNum = xmlMeta.number;
-         
+         // #203: annual domain — part of numbering identity, so the dedupe below never pairs
+         // "Annual #1" with the plain #1. Signals: ComicInfo <Format> / <Number> shape / filename.
+         const isAnnual = annualFlagForSignals(xmlMeta?.format, xmlMeta?.number, fileName);
+
          const writersStr = xmlMeta?.writers?.length ? JSON.stringify(xmlMeta.writers) : null;
          const artistsStr = xmlMeta?.artists?.length ? JSON.stringify(xmlMeta.artists) : null;
          const charsStr = xmlMeta?.characters?.length ? JSON.stringify(xmlMeta.characters) : null;
@@ -960,7 +973,7 @@ export const Importer = {
          const allSeriesIssues = await prisma.issue.findMany({
              where: { seriesId: series.id }
          });
-         const existingIssue = allSeriesIssues.find(i => isSameIssue(i.number, issueNum));
+         const existingIssue = allSeriesIssues.find(i => (((i as any).isAnnual ?? false) === isAnnual) && isSameIssue(i.number, issueNum));
          const targetMetaId = xmlMeta?.metadataIssueId ? xmlMeta.metadataIssueId.toString() : `unmatched_${Math.random()}`;
          const targetMetaSource = xmlMeta?.metadataIssueId ? xmlMeta.metadataSource : 'LOCAL';
          const matchState = xmlMeta?.metadataIssueId ? 'MATCHED' : 'UNMATCHED';
@@ -999,9 +1012,10 @@ export const Importer = {
                      metadataId: targetMetaId,
                      metadataSource: targetMetaSource,
                      matchState: matchState,
-                     number: issueNum, 
-                     status: 'DOWNLOADED', 
-                     filePath: finalPath, 
+                     number: issueNum,
+                     isAnnual,
+                     status: 'DOWNLOADED',
+                     filePath: finalPath,
                      pageCount,
                      name: xmlMeta?.title || null,
                      description: xmlMeta?.summary || null,

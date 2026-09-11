@@ -28,6 +28,8 @@ import { cn } from "@/lib/utils"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import MetadataEditorModal from "@/components/metadata-editor-modal"
 import PageManagerModal from "@/components/page-manager-modal"
+import { AttachedVolumesManager } from "@/components/attached-volumes-manager"
+import { requestNameFor } from "@/lib/utils/request-name"
 
 // Loop-safe fallback for cover <img>s: on a broken cover, swap to the series cover; if that also fails,
 // hide the element rather than show the browser's broken-image glyph. (The issue grid had no onError, so
@@ -73,6 +75,9 @@ function SeriesContent() {
   const [missingIssues, setMissingIssues] = useState<any[]>([]);
   const [activeIssue, setActiveIssue] = useState<any>(null);
   const [duplicates, setDuplicates] = useState<any[]>([]);
+  // #203 COLLECTED: trades/omnibuses attached to this series — their own shelf, out of the run.
+  const [collectedEditions, setCollectedEditions] = useState<any[]>([]);
+  const [missingCollectedEditions, setMissingCollectedEditions] = useState<any[]>([]);
   
   const [seriesInfo, setSeriesInfo] = useState<{name: string, cover: string | null, cvId: number | null, metadataId: string | null, metadataSource: string, path: string | null, id: string | null, isFavorite: boolean, isFollowing: boolean, publisher: string | null, year: string | null, description: string | null, status: string | null, bookType: string | null, monitored: boolean, isManga: boolean, universe?: string | null, seriesGroup?: string | null, matchState?: string, hasCustomCover?: boolean, genres?: string[]}>({
     name: "", cover: null, cvId: null, metadataId: null, metadataSource: 'COMICVINE', path: null, id: null, isFavorite: false, isFollowing: false, publisher: null, year: null, description: null, status: null, bookType: null, monitored: false, isManga: false, matchState: 'MATCHED', hasCustomCover: false, genres: []
@@ -281,6 +286,8 @@ function SeriesContent() {
             setDownloadedIssues(data.downloadedIssues || []);
             setMissingIssues(data.missingIssues || []);
             setDuplicates(data.duplicates || []);
+          setCollectedEditions(data.collectedEditions || []);
+          setMissingCollectedEditions(data.missingCollectedEditions || []);
             
             setSeriesInfo({
                 name: data.seriesName || data.name || "Unknown Series",
@@ -390,6 +397,24 @@ function SeriesContent() {
   const displayCover = activeIssue?.coverUrl || seriesInfo.cover;
   
   const hasCreators = writers.length > 0 || artists.length > 0 || coverArtists.length > 0 || colorists.length > 0 || letterers.length > 0;
+
+  // #203 Phase 1: a quiet re-read of the series payload after an attach/detach — the issue lists
+  // change (claimed rows, new missing entries) but nothing else on the page should flicker.
+  const reloadIssues = async () => {
+      if (!folderPath) return;
+      try {
+          const res = await fetch(`/api/library/series?path=${encodeURIComponent(folderPath)}&t=${Date.now()}`, { cache: 'no-store' });
+          const data = await res.json();
+          if (data.error) return;
+          setDownloadedIssues(data.downloadedIssues || []);
+          setMissingIssues(data.missingIssues || []);
+          setDuplicates(data.duplicates || []);
+          setCollectedEditions(data.collectedEditions || []);
+          setMissingCollectedEditions(data.missingCollectedEditions || []);
+      } catch (e) {
+          Logger.log(`[Series] Couldn't refresh the issue lists after an attachment change: ${getErrorMessage(e)}`, 'debug');
+      }
+  };
 
   const handleScanDirectory = async () => {
       if (!folderPath) return;
@@ -522,15 +547,13 @@ function SeriesContent() {
             toast({ title: "Requests not enabled", description: "Ask an admin to grant you the Request permission.", variant: "destructive" });
             return;
         }
-        // Issue #200: parsedNum is NaN→null for anything parseFloat can't read (a "½" pre-fix, an
-        // "Annual" forever) — fall back to the raw stored number so a request never says "#null".
-        const reqNum = (issue.parsedNum ?? issue.number ?? '').toString();
-        let compositeName = `${seriesInfo.name} #${reqNum}`;
-        if (issue.name && issue.name !== seriesInfo.name && !issue.name.includes(`#${reqNum}`)) {
-            compositeName += `: ${issue.name}`;
-        } else if (issue.name && issue.name.includes(`#${reqNum}`)) {
-            compositeName = issue.name;
-        }
+        // The composite is built by the ONE shared helper (request-name.ts): the library-wide
+        // Missing Issues view files through the same function, so both doors hand the downloader
+        // the identical search string. The #200 / #203 rules live there now, with their tests.
+        const { composite: compositeName, reqNum } = requestNameFor({
+            seriesName: seriesInfo.name, number: issue.number, parsedNum: issue.parsedNum,
+            name: issue.name, isAnnual: issue.isAnnual, isCollected: issue.isCollected, collectionName: issue.collectionName,
+        });
 
         setRequestingIds(prev => new Set(prev).add(issue.id));
         try {
@@ -1663,8 +1686,10 @@ function SeriesContent() {
                       </p>
                       <div className="space-y-3 pt-2">
                           {duplicates.map(dup => (
-                              <div key={dup.issueNumber} className="flex flex-col bg-background p-3 rounded-lg border border-border shadow-sm">
-                                  <p className="font-bold text-sm mb-2 text-foreground">Issue #{dup.issueNumber}</p>
+                              // #203: annual and main-run duplicates are different slots — the key
+                              // must carry the domain too, and the label should name it.
+                              <div key={`${dup.isAnnual ? 'annual' : 'issue'}_${dup.issueNumber}`} className="flex flex-col bg-background p-3 rounded-lg border border-border shadow-sm">
+                                  <p className="font-bold text-sm mb-2 text-foreground">{dup.isAnnual ? 'Annual' : 'Issue'} #{dup.issueNumber}</p>
                                   <div className="flex flex-col gap-2 pl-4 border-l-2 border-muted">
                                       {dup.files.map((file: string, idx: number) => (
                                           <p key={idx} className="text-xs font-mono text-muted-foreground break-all">{file}</p>
@@ -1672,6 +1697,81 @@ function SeriesContent() {
                                   </div>
                               </div>
                           ))}
+                      </div>
+                  </div>
+              )}
+
+              {/* --- ATTACHED VOLUMES (#203 Phase 1): annuals, and collected editions --- */}
+              {isAdmin && seriesInfo.id && (
+                  <>
+                      <AttachedVolumesManager
+                          seriesId={seriesInfo.id}
+                          seriesName={seriesInfo.name}
+                          kind="ANNUAL"
+                          defaultProvider={seriesInfo.metadataSource}
+                          unattachedAnnuals={downloadedIssues.filter(i => i.isAnnual && !i.attachedVolumeId).length}
+                          onChanged={reloadIssues}
+                      />
+                      <AttachedVolumesManager
+                          seriesId={seriesInfo.id}
+                          seriesName={seriesInfo.name}
+                          kind="COLLECTED"
+                          defaultProvider={seriesInfo.metadataSource}
+                          onChanged={reloadIssues}
+                      />
+                  </>
+              )}
+
+              {/* Collected editions read as their own shelf — never mixed into the run, and never
+                  counted among it (a trade reprints issues you may already own). */}
+              {(collectedEditions.length > 0 || missingCollectedEditions.length > 0) && (
+                  <div className="space-y-4 mb-8">
+                      <div className="flex items-center justify-between border-b-2 border-border pb-4">
+                          <h4 className="font-black flex items-center gap-2 text-xl text-foreground tracking-tight">
+                              <BookMarked className="w-6 h-6 text-primary" /> Collected Editions ({collectedEditions.length}{missingCollectedEditions.length > 0 ? ` of ${collectedEditions.length + missingCollectedEditions.length}` : ''})
+                          </h4>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 gap-4">
+                          {[...collectedEditions, ...missingCollectedEditions].map(book => {
+                              const owned = !!book.fullPath;
+                              const isRequesting = requestingIds.has(book.id);
+                              const isRequested = requestedIds.has(book.id);
+                              return (
+                                  <div
+                                      key={book.id}
+                                      onClick={() => owned && setActiveIssue(book)}
+                                      className={cn(
+                                          "flex items-center gap-3 p-3 rounded-xl border bg-background shadow-sm transition-all",
+                                          owned ? "cursor-pointer hover:border-primary/50" : "opacity-80",
+                                          activeIssue?.id === book.id ? "border-primary ring-2 ring-primary/30" : "border-border"
+                                      )}
+                                  >
+                                      <div className="w-12 h-[68px] shrink-0 rounded overflow-hidden bg-muted border border-border">
+                                          {book.coverUrl
+                                              ? <img src={book.coverUrl} alt="" className="w-full h-full object-cover" onError={coverImgError(seriesInfo.cover)} />
+                                              : null}
+                                      </div>
+                                      <div className="min-w-0 flex-1">
+                                          <p className="text-sm font-bold text-foreground truncate" title={book.name}>{book.name}</p>
+                                          <p className="text-xs text-muted-foreground">Vol. {book.number}</p>
+                                      </div>
+                                      {/* Collections sit outside the run's missing-issue math, so they
+                                          need their own way to be asked for — searched by the book's
+                                          own title, never as "{Series} #N". */}
+                                      {!owned && canRequest && (
+                                          <Button
+                                              size="sm"
+                                              variant="outline"
+                                              className="h-8 px-2 text-[10px] font-black uppercase tracking-wider shrink-0 border-primary/30 text-primary hover:bg-primary/10"
+                                              disabled={isRequesting || isRequested}
+                                              onClick={(e) => { e.stopPropagation(); handleRequestMissing(book); }}
+                                          >
+                                              {isRequesting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : (isRequested ? 'Requested' : 'Request')}
+                                          </Button>
+                                      )}
+                                  </div>
+                              );
+                          })}
                       </div>
                   </div>
               )}
@@ -1737,7 +1837,7 @@ function SeriesContent() {
                                       {issue.readProgress > 0 && !isRead && <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/50"><div className="h-full bg-primary" style={{ width: `${issue.readProgress}%` }} /></div>}
                                     </div>
                                     <div className="flex flex-col justify-between flex-1 py-1 min-w-0">
-                                      <div><h5 className={cn("font-bold text-base line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</h5>{issue.parsedNum !== null && <span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">Issue #{issue.parsedNum}</span>}</div>
+                                      <div><h5 className={cn("font-bold text-base line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</h5>{issue.parsedNum !== null && <span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</span>}</div>
                                       <div className="flex flex-wrap items-center gap-1.5 mt-3">
                                         <Button size="sm" variant={isSelected && !isSelectionMode ? "default" : "outline"} className="flex-1 font-bold shadow-md min-w-[70px]" asChild onClick={(e) => { if (isSelectionMode) { e.preventDefault(); } else { e.stopPropagation(); } }}>
                                             <Link href={`/reader?path=${encodeURIComponent(issue.fullPath)}&series=${encodeURIComponent(folderPath || '')}`}>
@@ -1815,7 +1915,7 @@ function SeriesContent() {
                                                   </td>
                                                   <td className="px-4 py-3 font-bold">
                                                       <div className={cn("line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</div>
-                                                      {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">Issue #{issue.parsedNum}</div>}
+                                                      {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</div>}
                                                   </td>
                                                   <td className="px-4 py-3 text-center">
                                                       {isRead ? <Badge className="bg-green-600 border-0 text-[9px] px-1 h-4"><Check className="w-3 h-3 mr-1"/> Read</Badge> : issue.readProgress > 0 ? <Badge className="bg-primary border-0 text-primary-foreground text-[9px] px-1 h-4">{Math.round(issue.readProgress)}%</Badge> : <span className="text-muted-foreground text-xs">-</span>}
@@ -1912,7 +2012,7 @@ function SeriesContent() {
                                       <div key={issue.id} onClick={() => setActiveIssue(issue)} className="flex gap-4 p-4 bg-muted/30 border border-border/50 rounded-xl shadow-sm opacity-80 hover:opacity-100 transition-all cursor-pointer">
                                         <div className="w-20 h-28 shrink-0 rounded-md overflow-hidden bg-muted border border-border grayscale">{issue.coverUrl || seriesInfo.cover ? <img src={issue.coverUrl || seriesInfo.cover} onError={coverImgError(seriesInfo.cover)} className="w-full h-full object-cover" alt="" /> : <ImageIcon className="w-8 h-8 m-auto mt-10 text-muted-foreground/50" />}</div>
                                         <div className="flex flex-col justify-between flex-1 py-1 min-w-0">
-                                            <div><h5 className="font-bold text-base line-clamp-2 text-foreground leading-tight">{issue.name}</h5><span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">Issue #{issue.parsedNum}</span></div>
+                                            <div><h5 className="font-bold text-base line-clamp-2 text-foreground leading-tight">{issue.name}</h5><span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</span></div>
                                             <div className="flex flex-wrap items-center gap-2 mt-3">{isAlreadyRequested ? <Button size="sm" variant="secondary" disabled className="flex-1 h-9 bg-green-50 text-green-700 dark:bg-green-900/20 border-green-200 opacity-100 cursor-not-allowed"><Check className="w-4 h-4 mr-2"/> Queued</Button> : <Button size="sm" variant="outline" className="flex-1 h-9 font-black text-[10px] border-border hover:bg-muted uppercase tracking-wider min-w-[80px]" onClick={(e) => { e.stopPropagation(); handleRequestMissing(issue); }} disabled={isRequesting}>{isRequesting ? <Loader2 className="w-4 h-4 animate-spin mr-2"/> : <CloudDownload className="w-4 h-4 mr-2"/>}Request</Button>}</div>
                                         </div>
                                       </div>
@@ -1943,7 +2043,7 @@ function SeriesContent() {
                                                       </td>
                                                       <td className="px-4 py-3 font-bold">
                                                           <div className="line-clamp-2 leading-tight text-foreground">{issue.name}</div>
-                                                          {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">Issue #{issue.parsedNum}</div>}
+                                                          {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</div>}
                                                       </td>
                                                       <td className="px-4 py-3 text-right">
                                                           {isAlreadyRequested ? (

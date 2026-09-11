@@ -99,6 +99,21 @@ pub async fn record_sweep_result(db: &Db, value: serde_json::Value) {
 /// Budget-aware: free file evidence always runs; API work (issue-id resolution, name search) stops
 /// once ComicVine's hourly window nears the wall and RESUMES on the next scheduled run — the fix
 /// for "matching just gives up after the rate limit" (discussion #177).
+/// The series the automatic sweep is allowed to touch.
+///
+/// The three OR'd conditions are the historical definition of "not matched yet" — a state of
+/// UNMATCHED, no provider id at all, or a placeholder `unmatched_*` id (rows born from a scan).
+/// The IGNORED exclusion is the one that needs stating: an admin who marks a series ignored has
+/// said "I curated this by hand, stop offering to match it" — but such a series still has a null or
+/// placeholder metadataId, so without this clause the very next sweep would pick it up and
+/// auto-match it anyway, which is precisely the nagging the state exists to end.
+pub(crate) fn unmatched_candidates_sql() -> &'static str {
+    r#"SELECT id, name, year, "folderPath" FROM "Series"
+       WHERE ("matchState" IS NULL OR "matchState" <> 'IGNORED')
+         AND ("matchState" = 'UNMATCHED' OR "metadataId" IS NULL OR "metadataId" LIKE 'unmatched%')
+       ORDER BY "updatedAt" ASC LIMIT 100"#
+}
+
 pub async fn run_unmatched_sweep(db: Db) -> anyhow::Result<SweepOutcome> {
     let get_setting = |key: &'static str| {
         let pool = db.pool.clone();
@@ -128,11 +143,7 @@ pub async fn run_unmatched_sweep(db: Db) -> anyhow::Result<SweepOutcome> {
     let cv_key = crate::secret_crypto::decrypt_setting(&db.pool, get_setting("cv_api_key").await).await
         .filter(|k| !k.trim().is_empty());
 
-    let rows = sqlx::query(
-        r#"SELECT id, name, year, "folderPath" FROM "Series"
-           WHERE "matchState" = 'UNMATCHED' OR "metadataId" IS NULL OR "metadataId" LIKE 'unmatched%'
-           ORDER BY "updatedAt" ASC LIMIT 100"#,
-    )
+    let rows = sqlx::query(unmatched_candidates_sql())
     .fetch_all(&db.pool)
     .await?;
 
@@ -204,7 +215,7 @@ pub async fn run_unmatched_sweep(db: Db) -> anyhow::Result<SweepOutcome> {
             continue;
         }
         searches_this_run += 1;
-        match cv_search_best(&db, &client, cv_key.as_deref().unwrap_or(""), &name).await {
+        match cv_search_best(&db, &client, cv_key.as_deref().unwrap_or(""), &name, year).await {
             Ok(Some((vol_id, vol_name, start_year))) => {
                 let sim = name_similarity(&name, &vol_name);
                 let year_matches = year > 0 && start_year.map(|sy| (sy - year).abs() <= 1).unwrap_or(false);
@@ -308,8 +319,8 @@ async fn apply_match(db: &Db, series_id: &str, series_name: &str, source: &str, 
 }
 
 /// Best ComicVine volume candidate for a series name: one /search/ call, results ranked by
-/// name_similarity. Returns (volume_id, volume_name, start_year).
-async fn cv_search_best(db: &Db, client: &reqwest::Client, api_key: &str, name: &str) -> anyhow::Result<Option<(i32, String, Option<i32>)>> {
+/// name_similarity plus the year term (see pick_best). Returns (volume_id, volume_name, start_year).
+async fn cv_search_best(db: &Db, client: &reqwest::Client, api_key: &str, name: &str, year: i32) -> anyhow::Result<Option<(i32, String, Option<i32>)>> {
     let req = client
         .get("https://comicvine.gamespot.com/api/search/")
         .query(&[
@@ -341,22 +352,48 @@ async fn cv_search_best(db: &Db, client: &reqwest::Client, api_key: &str, name: 
         }
     };
     let results = json["results"].as_array().cloned().unwrap_or_default();
-
-    let mut best: Option<(i32, String, Option<i32>, f64)> = None;
-    for r in &results {
-        let Some(id) = r["id"].as_i64().map(|v| v as i32) else { continue };
+    let candidates: Vec<(i32, String, Option<i32>)> = results.iter().filter_map(|r| {
+        let id = r["id"].as_i64().map(|v| v as i32)?;
         let vol_name = r["name"].as_str().unwrap_or("").to_string();
-        if vol_name.is_empty() {
-            continue;
-        }
+        if vol_name.is_empty() { return None; }
         let start_year = r["start_year"].as_str().and_then(|s| s.trim().parse::<i32>().ok())
             .or_else(|| r["start_year"].as_i64().map(|v| v as i32));
-        let sim = name_similarity(name, &vol_name);
-        if best.as_ref().map(|(_, _, _, b)| sim > *b).unwrap_or(true) {
-            best = Some((id, vol_name, start_year, sim));
+        Some((id, vol_name, start_year))
+    }).collect();
+    Ok(pick_best(name, year, candidates))
+}
+
+/// The year's contribution to a candidate's score — a tiebreaker-plus, deliberately small next to
+/// a full-name match: exact +0.10, off by one +0.05 (ComicVine's start_year and a folder's year
+/// disagree by one all the time), further off −0.05, either side unknown 0. EXACT twin of
+/// smart-match-search.ts yearTerm: the sweep and the Smart Matcher must rank identically, or the
+/// sweep would auto-match what the UI would reject.
+///
+/// The magnitudes keep the year's whole reach (0.15) under a one-token name difference on a
+/// two-token name (0.2), so a folder whose year is wrong by three still resolves to the exact name
+/// rather than a same-year near-miss such as its own annual.
+pub(crate) fn year_term(candidate_year: Option<i32>, wanted_year: i32) -> f64 {
+    let Some(cy) = candidate_year.filter(|y| *y > 0) else { return 0.0 };
+    if wanted_year <= 0 { return 0.0; }
+    match (cy - wanted_year).abs() {
+        0 => 0.10,
+        1 => 0.05,
+        _ => -0.05,
+    }
+}
+
+/// Pure ranking over already-parsed candidates (id, name, start_year): the name dominates unless
+/// names tie, and then the year decides. Extracted from cv_search_best so it can be tested without
+/// HTTP. Ties keep the provider's order (stable: only a strictly better score replaces the best).
+pub(crate) fn pick_best(name: &str, year: i32, candidates: Vec<(i32, String, Option<i32>)>) -> Option<(i32, String, Option<i32>)> {
+    let mut best: Option<(i32, String, Option<i32>, f64)> = None;
+    for (id, vol_name, start_year) in candidates {
+        let score = name_similarity(name, &vol_name) + year_term(start_year, year);
+        if best.as_ref().map(|(_, _, _, b)| score > *b).unwrap_or(true) {
+            best = Some((id, vol_name, start_year, score));
         }
     }
-    Ok(best.map(|(id, n, y, _)| (id, n, y)))
+    best.map(|(id, n, y, _)| (id, n, y))
 }
 
 /// Name similarity in [0, 1]: case-insensitive token Dice coefficient over alphanumeric words.
@@ -400,6 +437,80 @@ pub(crate) fn budget_exhausted(calls_last_window: usize, limit: usize, reserve: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sweep must leave IGNORED series alone — they still carry a null/placeholder metadataId,
+    /// so the pre-IGNORED query would have re-offered them on every run (field report from
+    /// robotshavehearts2: hand-curated TPBs ComicVine simply doesn't have).
+    #[tokio::test]
+    async fn sweep_candidates_skip_ignored_but_keep_every_other_unmatched_shape() {
+        let base = std::env::temp_dir().join(format!("omnibus_matchsweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create fixture dir");
+        let db_file = base.join("sweep.db");
+        std::fs::File::create(&db_file).expect("pre-create sqlite file");
+        let db_url = format!("file:{}", db_file.to_string_lossy().replace('\\', "/"));
+        let db = crate::db::Db::connect(&db_url, 2).await.expect("connect file-backed sqlite");
+
+        sqlx::query(
+            r#"CREATE TABLE "Series" (id TEXT PRIMARY KEY, name TEXT, year INTEGER, "folderPath" TEXT,
+               "matchState" TEXT, "metadataId" TEXT, "updatedAt" TEXT)"#,
+        )
+        .execute(&db.pool).await.expect("create schema");
+
+        for (id, state, meta) in [
+            ("s_unmatched", Some("UNMATCHED"), None),
+            ("s_null_id", Some("MATCHED"), None),                       // no id yet = still a candidate
+            ("s_placeholder", Some("MATCHED"), Some("unmatched_abc")),  // scan-born placeholder id
+            ("s_ignored", Some("IGNORED"), None),                       // hand-curated: leave it alone
+            ("s_matched", Some("MATCHED"), Some("42821")),
+        ] {
+            sqlx::query(r#"INSERT INTO "Series" (id, name, year, "folderPath", "matchState", "metadataId", "updatedAt") VALUES ($1, $1, 2024, '/c', $2, $3, '2026-08-27')"#)
+                .bind(id).bind(state).bind(meta)
+                .execute(&db.pool).await.expect("seed series");
+        }
+
+        let rows = sqlx::query(unmatched_candidates_sql()).fetch_all(&db.pool).await.expect("candidates");
+        let mut ids: Vec<String> = rows.iter().map(|r| r.get::<String, _>("id")).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["s_null_id", "s_placeholder", "s_unmatched"]);
+        assert!(!ids.contains(&"s_ignored".to_string()), "an ignored series must never be swept");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // Suggestion ranking (robotshavehearts2's "way off" auto-matches): the year is a
+    // tiebreaker-plus, never a sort key. Twin cases live in smart-match-prefill-helpers.test.ts.
+    #[test]
+    fn year_term_rewards_agreement_modestly_and_ignores_unknowns() {
+        assert_eq!(year_term(Some(2024), 2024), 0.10);
+        assert_eq!(year_term(Some(2023), 2024), 0.05);
+        assert_eq!(year_term(Some(2016), 2011), -0.05);
+        assert_eq!(year_term(None, 2024), 0.0);
+        assert_eq!(year_term(Some(2024), 0), 0.0);
+        assert_eq!(year_term(Some(0), 2024), 0.0);
+    }
+
+    #[test]
+    fn pick_best_lets_the_name_dominate_and_the_year_break_ties() {
+        let c = |id: i32, n: &str, y: Option<i32>| (id, n.to_string(), y);
+        // The field report's shape: every 2024 volume used to be pulled ahead of the exact name.
+        let cands = vec![
+            c(1, "X-Men: From the Ashes Infinity Comic", Some(2024)),
+            c(2, "X-Men Annual", Some(2024)),
+            c(3, "X-Men", Some(2024)),
+            c(4, "X-Men", Some(1991)),
+        ];
+        assert_eq!(pick_best("X-Men", 2024, cands.clone()).map(|b| b.0), Some(3));
+        // A wrong folder year must not hand the win to a same-year wrong name.
+        let cands2 = vec![c(1, "Batman Eternal", Some(2014)), c(2, "Batman", Some(2011)), c(3, "Batman", Some(2016))];
+        assert_eq!(pick_best("Batman", 2014, cands2.clone()).map(|b| b.0), Some(2));
+        // Among equal names, off-by-one beats far-off.
+        assert_eq!(pick_best("Batman", 2012, cands2).map(|b| b.0), Some(2));
+        // Plain series over its annual when both share the year.
+        assert_eq!(pick_best("Batman", 2012, vec![c(1, "Batman Annual", Some(2012)), c(2, "Batman", Some(2012))]).map(|b| b.0), Some(2));
+        // Nothing to rank → nothing.
+        assert!(pick_best("Batman", 2012, vec![]).is_none());
+    }
 
     #[test]
     fn name_similarity_folds_symbols_and_scores_tokens() {

@@ -56,18 +56,27 @@ no `:latest`, no GitHub Release, no Discord announcement.
 
 ### Current upstream comparison
 
-As of 2026-08-24, upstream `origin/main` is `6c63779` (`v1.4.4`), the fork `main` is `f573552`
-(31 commits ahead), and the deployed fork code is `v1.4.4.4` at `088fa08`. The commits after the
-deployed code are documentation-only follow-ups, so the Ottawa manifests still pin `088fa08`. There
-are no upstream-main commits missing from the fork. Upstream `origin/dev` has three unreleased
-v1.4.5 beta commits. They include useful annual-numbering and dependency work, but the annual change
-overlaps fork-owned schema/importer/API files; merging the branch wholesale would also remove the
-fork's Suwayomi integration, manga statuses, blocklist, and fork documentation. Wait for a stable
-upstream release and port compatible changes deliberately after re-running the fork's tests. In
-particular, beta.001 introduces the annual-numbering schema and broad parser/reconciler changes,
-beta.003 depends on that schema to heal bare rows from ComicInfo, and beta.002 is a security-worthy
-dependency refresh that must be applied under the fork's four-component build version rather than
-merging its `1.4.5-beta.002` package version into the deployed line.
+As of 2026-09-11, upstream `origin/main` is still `6c63779` (`v1.4.4`), while upstream
+`origin/dev` is `9bbf80b` (`v1.4.5-beta.013`). The fork merges that 13-commit development delta
+as candidate build `1.4.5.1`; the package and lockfile deliberately use the fork's four-component
+identifier, not upstream's prerelease string. The three-way merge had content conflicts only in
+those two version manifests. The merged annual/collection work was checked against the fork's
+Suwayomi, Komga, manga-status, blocklist, retry, and release tests, including an annual-aware
+mislabeled-release guard.
+
+This candidate is not yet promoted to Ottawa. The live manifests still pin the tested
+`v1.4.4.4` build from `088fa08`; that deployed state remains the rollback baseline until the new
+fork images, CI, and a separate Ottawa promotion pass are complete. Upstream's beta branch is not
+itself a stable upstream release, so record the source commit whenever a candidate is built and
+reset the fourth component only when the upstream maintainer publishes the corresponding stable
+three-component release.
+
+Renovate is owned by the manifests repository, not this application repository. Its
+`kubernetes-manifests/.github/renovate.json` rule matches both
+`ghcr.io/kbpersonal/omnibus` and `ghcr.io/kbpersonal/omnibus-engine`, uses explicit four-component
+regex versioning, groups the images, and leaves the group for review. The Ottawa manifest carries
+the matching `# renovate: datasource=docker depName=...` annotations and digest pins, so a future
+fork tag produces one coupled update rather than an upstream three-component comparison.
 
 ### Rebasing onto a new upstream release
 
