@@ -19,6 +19,7 @@ import { ENGINE_URL, engineHeaders } from '@/lib/engine';
 import { deleteUsenetSource } from '@/lib/utils/usenet-cleanup';
 import { payloadSeriesVerdict } from '@/lib/utils/release-match';
 import { blockRelease } from '@/lib/utils/release-blocklist';
+import { inspectArchiveQuality } from '@/lib/utils/archive-quality';
 
 // A wrong payload is a failed candidate, not a terminal request failure. Try two more releases
 // after the first rejection; each rejected release remains on the persistent blocklist so the
@@ -597,6 +598,15 @@ export const Importer = {
                 reason
             });
 
+            // A direct download has no seeding client to preserve. Remove the rejected payload before
+            // the next search so a retry cannot accidentally rediscover the same bad file by name. Keep
+            // torrent/usenet sources and explicit admin uploads recoverable for their owners.
+            if (!isFromClient && !opts?.sourcePathOverride) {
+                await fs.remove(actualSourceFile).catch((e: any) => {
+                    Logger.log(`[Importer] Could not remove rejected direct-download payload ${actualSourceFile}: ${e.message}`, 'debug');
+                });
+            }
+
             let failedLinks: string[] = [];
             try { failedLinks = JSON.parse((req as any).failedLinks || '[]'); } catch { failedLinks = []; }
             for (const blocked of [releaseTitle, req.downloadLink]) {
@@ -644,6 +654,20 @@ export const Importer = {
             }).catch(() => {});
             return false;
         };
+
+        // A release can have the right title and a valid ZIP central directory while still carrying a
+        // clipped image page. Komga/other readers render exactly what is in the archive, so reject the
+        // candidate at the import boundary, persist it in the same blocklist as wrong-series payloads,
+        // and let the request search for a different release.
+        const quality = await inspectArchiveQuality(actualSourceFile);
+        if (!quality.ok) {
+            const issue = quality.issue;
+            const detail = `${issue.code.replace(/-/g, ' ')}: ${issue.message}`;
+            return await rejectImport(
+                `has a rejected archive payload (${detail})`,
+                `Archive quality check failed: ${detail}`
+            );
+        }
 
         // Signal 1 — the PAYLOAD names a different comic. A release can be labelled correctly at the
         // indexer and still contain someone else's book (a mislabeled NZB delivering "Madman & The Jam

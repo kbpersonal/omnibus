@@ -2,11 +2,11 @@
 
 **Status:** accepted
 
-**Current candidate note (2026-09-11):** the fork has merged upstream `origin/dev` commit
-`9bbf80b` through `v1.4.5-beta.013` and records the unpromoted candidate as `1.4.5.1`. This is a
-development-line integration, not evidence that upstream `v1.4.5` has shipped. Ottawa remains on
-the previously promoted `1.4.4.4` image until the candidate completes the image, CI, Renovate,
-manifest, Flux, and live application gates below.
+**Current candidate note (2026-09-19):** the fork has merged upstream stable `origin/main` commit
+`33f13a0` (`v1.4.5`) and records the unpromoted candidate as `1.4.5.2`, which adds malformed-CBZ
+quarantine on top of the upstream release. Ottawa remains on the previously promoted `1.4.4.4`
+image until this candidate completes the image, CI, Renovate, manifest, Flux, and live application
+gates below.
 
 The fork follows the upstream release in the first three components and adds a fourth build component: upstream `1.4.4` becomes fork builds `1.4.4.1`, `1.4.4.2`, and so on. The third component changes only when a newer upstream release is merged; the fourth component resets to `.1` for the first fork build on that upstream release. This is intentionally a four-component fork build identifier, not strict SemVer, so the repository and Renovate must use an explicit four-component comparison rule rather than silently treating a fork build as a higher upstream patch release.
 

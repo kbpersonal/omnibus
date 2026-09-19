@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
     issueUpdateMany: vi.fn(),
     issueDeleteMany: vi.fn(),
     issueCreateMany: vi.fn(),
+    attachedVolumeFindMany: vi.fn(),
     favoriteFindUnique: vi.fn(),
     followFindUnique: vi.fn(),
     progressFindMany: vi.fn(),
@@ -41,6 +42,7 @@ vi.mock('@/lib/db', () => ({
             deleteMany: mocks.issueDeleteMany,
             createMany: mocks.issueCreateMany,
         },
+        attachedVolume: { findMany: mocks.attachedVolumeFindMany },
         favorite: { findUnique: mocks.favoriteFindUnique },
         seriesFollow: { findUnique: mocks.followFindUnique },
         readProgress: { findMany: mocks.progressFindMany },
@@ -71,6 +73,7 @@ describe('API Route: Library Series Scan reconciliation', () => {
         mocks.access.mockRejectedValue(new Error('ENOENT'));
         mocks.issueDeleteMany.mockResolvedValue({ count: 0 });
         mocks.issueCreateMany.mockResolvedValue({ count: 0 });
+        mocks.attachedVolumeFindMany.mockResolvedValue([]);
         mocks.issueUpdateMany.mockResolvedValue({ count: 1 });
         // Lightweight map, pre-repair view, and re-read after the repair.
         mocks.issueFindMany

@@ -4,7 +4,7 @@
 // into a settings tab without threading state through the settings bag.
 //
 // The importer adds entries here on its own when it refuses a payload belonging to a different
-// series, and the search path then skips those releases forever. Without this view a block is
+// series or carrying malformed page geometry, and the search path then skips those releases forever. Without this view a block is
 // invisible — an issue simply stops downloading with no way to see why or to undo a false positive.
 "use client"
 
@@ -68,7 +68,7 @@ export function BlockedReleases() {
                     <Ban className="w-4 h-4 text-primary" /> Blocked Releases
                 </h3>
                 <p className="text-[11px] text-muted-foreground mt-1">
-                    Releases refused at import because the file inside belonged to a different series. They are skipped by every future search. Unblock one to make it downloadable again.
+                    Releases refused at import because the payload belonged to a different series/issue or contained unreadable or undersized pages. They are skipped by future searches. Unblock one to make it downloadable again.
                 </p>
             </div>
 

@@ -26,6 +26,7 @@ const mocks = vi.hoisted(() => ({
     parseComicInfo: vi.fn().mockResolvedValue({}),
     convertCbrToCbz: vi.fn().mockResolvedValue(null),
     syncSeriesMetadata: vi.fn().mockResolvedValue(true),
+    inspectArchiveQuality: vi.fn().mockResolvedValue({ ok: true, checked: false }),
     // global fetch (engine nested-pack offload)
     fetch: vi.fn(),
     zipGetEntries: vi.fn().mockReturnValue([])
@@ -73,6 +74,7 @@ vi.mock('@/lib/manga-detector', () => ({ detectManga: mocks.detectManga }));
 vi.mock('@/lib/metadata-extractor', () => ({ parseComicInfo: mocks.parseComicInfo }));
 vi.mock('@/lib/converter', () => ({ convertCbrToCbz: mocks.convertCbrToCbz }));
 vi.mock('@/lib/metadata-fetcher', () => ({ syncSeriesMetadata: mocks.syncSeriesMetadata }));
+vi.mock('@/lib/utils/archive-quality', () => ({ inspectArchiveQuality: mocks.inspectArchiveQuality }));
 vi.mock('adm-zip', () => ({ default: class AdmZipMock { getEntries() { return mocks.zipGetEntries(); } } }));
 vi.mock('axios');
 
@@ -98,6 +100,7 @@ describe('File System: Importer Engine', () => {
         mocks.zipGetEntries.mockReturnValue([]);
         mocks.getAllActiveDownloads.mockResolvedValue([]);
         mocks.findFirstClient.mockResolvedValue(null);
+        mocks.inspectArchiveQuality.mockResolvedValue({ ok: true, checked: false });
     });
 
     it('should stall the request if the downloaded file is missing from the hard drive', async () => {
@@ -421,6 +424,56 @@ describe('File System: Importer Engine', () => {
 
         vi.mocked(fs.statSync).mockReturnValue({ isDirectory: () => false, size: 1000000 } as any);
         vi.mocked(fs.promises.readdir).mockResolvedValue([] as any);
+    });
+
+    it('refuses a release with a cut-off page, blocklists it, and searches for another release', async () => {
+        mocks.findUniqueRequest.mockResolvedValueOnce({
+            id: 'req_1', status: 'DOWNLOADING',
+            activeDownloadName: 'Absolute Catwoman #03 (2026) (Digital) (cbz)',
+            downloadLink: 'https://getcomics.org/dls/bad-release', volumeId: 'cv_catwoman', createdAt: new Date()
+        });
+        mocks.findFirstSeries.mockResolvedValueOnce({
+            id: 'series_1', name: 'Absolute Catwoman', publisher: 'DC Comics', year: 2026, libraryId: 'lib_1', isManga: false
+        });
+        mocks.inspectArchiveQuality.mockResolvedValueOnce({
+            ok: false,
+            checked: true,
+            issue: {
+                code: 'undersized-page',
+                entryName: 'page_0050.jpg',
+                width: 800,
+                height: 660,
+                dominantHeight: 1280,
+                message: 'page page_0050.jpg is 800x660, but this archive\'s normal page height is 1280px'
+            }
+        });
+
+        const result = await Importer.importRequest('req_1');
+
+        expect(result).toBe(false);
+        expect(fs.copy).not.toHaveBeenCalled();
+        expect(fs.move).not.toHaveBeenCalled();
+        expect(mocks.createBlocklist).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                releaseTitle: 'Absolute Catwoman #03 (2026) (Digital) (cbz)',
+                downloadLink: 'https://getcomics.org/dls/bad-release',
+                volumeId: 'cv_catwoman',
+                reason: expect.stringContaining('page_0050.jpg')
+            })
+        }));
+        expect(mocks.updateRequest).toHaveBeenCalledWith(expect.objectContaining({
+            data: expect.objectContaining({
+                status: 'PENDING',
+                downloadLink: null,
+                rejectedReleaseCount: 1,
+                activeDownloadName: 'Absolute Catwoman #3'
+            })
+        }));
+        expect(omnibusQueue.add).toHaveBeenCalledWith(
+            'SEARCH_AND_DOWNLOAD',
+            expect.objectContaining({ requestId: 'req_1', name: 'Absolute Catwoman #3', year: '2026' }),
+            expect.objectContaining({ jobId: expect.stringMatching(/^SEARCH_req_1_/) })
+        );
     });
 
     it('holds for review only after the third mismatched release', async () => {

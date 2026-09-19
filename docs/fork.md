@@ -16,6 +16,9 @@ What the fork currently carries:
 - **Mislabeled-release protection** — an import is refused when the archive inside the payload
   belongs to a different series than the one requested, and the release is blocklisted so the
   monitor cannot re-download it on the next tick.
+- **Malformed-archive protection** — CBZ/ZIP payloads are checked for unreadable or severely
+  undersized page images before import. A bad release is refused, blocklisted, and searched again;
+  admins can review or unblock it from Settings → Blocked Releases.
 - **Cluster fixes** — engine retries for node callbacks and pod-relative paths, and admins can
   retry interactive searches.
 
@@ -56,13 +59,12 @@ no `:latest`, no GitHub Release, no Discord announcement.
 
 ### Current upstream comparison
 
-As of 2026-09-11, upstream `origin/main` is still `6c63779` (`v1.4.4`), while upstream
-`origin/dev` is `9bbf80b` (`v1.4.5-beta.013`). The fork merges that 13-commit development delta
-as candidate build `1.4.5.1`; the package and lockfile deliberately use the fork's four-component
-identifier, not upstream's prerelease string. The three-way merge had content conflicts only in
-those two version manifests. The merged annual/collection work was checked against the fork's
-Suwayomi, Komga, manga-status, blocklist, retry, and release tests, including an annual-aware
-mislabeled-release guard.
+As of 2026-09-19, upstream `origin/main` is `33f13a0` (`v1.4.5`). The fork merged that stable
+release while preserving its Suwayomi and blocklist changes, then cut build `1.4.5.2` for the
+malformed-archive guard. The package and lockfile deliberately use the fork's four-component
+identifier, not upstream's three-component string. The merge conflicts were limited to the version
+manifests and one test mock; both the upstream attached-volume mock and the fork's issue update mock
+were retained.
 
 This candidate is not yet promoted to Ottawa. The live manifests still pin the tested
 `v1.4.4.4` build from `088fa08`; that deployed state remains the rollback baseline until the new
