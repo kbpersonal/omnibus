@@ -2,6 +2,8 @@
 "use client"
 
 import { useState, useEffect, useTransition, Suspense, useMemo, type SyntheticEvent } from "react"
+import { IssueSortControl } from "@/components/issue-sort-control"
+import { sortIssuesForDisplay, laneLabel, parseIssueSortMode, DEFAULT_ISSUE_SORT, ISSUE_SORT_STORAGE_KEY, type IssueSortMode } from "@/lib/utils/issue-sort"
 import { useSearchParams, useRouter } from "next/navigation"
 import { useSession } from "next-auth/react"
 import { Button } from "@/components/ui/button"
@@ -29,6 +31,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import MetadataEditorModal from "@/components/metadata-editor-modal"
 import PageManagerModal from "@/components/page-manager-modal"
 import { AttachedVolumesManager } from "@/components/attached-volumes-manager"
+import { FolderCollisionDialog, type FolderCollision, type CollisionResolution } from "@/components/folder-collision-dialog"
+import { CoverageField } from "@/components/coverage-field"
+import { CoveredIssuesSection } from "@/components/covered-issues-section"
 import { requestNameFor } from "@/lib/utils/request-name"
 
 // Loop-safe fallback for cover <img>s: on a broken cover, swap to the series cover; if that also fails,
@@ -70,6 +75,9 @@ function SeriesContent() {
   
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  // #203 round 3: the issue lists' order — by number (the run, then the annuals) or by release
+  // date (annuals fall in between). One remembered choice for every series page, like the view.
+  const [sortMode, setSortMode] = useState<IssueSortMode>(DEFAULT_ISSUE_SORT);
 
   const [downloadedIssues, setDownloadedIssues] = useState<any[]>([]);
   const [missingIssues, setMissingIssues] = useState<any[]>([]);
@@ -78,7 +86,10 @@ function SeriesContent() {
   // #203 COLLECTED: trades/omnibuses attached to this series — their own shelf, out of the run.
   const [collectedEditions, setCollectedEditions] = useState<any[]>([]);
   const [missingCollectedEditions, setMissingCollectedEditions] = useState<any[]>([]);
-  
+  // #203 COLLECTED coverage: main-run issues an OWNED collected edition reprints — not missing,
+  // not on disk; each carries `coveredBy` naming the book.
+  const [coveredIssues, setCoveredIssues] = useState<any[]>([]);
+
   const [seriesInfo, setSeriesInfo] = useState<{name: string, cover: string | null, cvId: number | null, metadataId: string | null, metadataSource: string, path: string | null, id: string | null, isFavorite: boolean, isFollowing: boolean, publisher: string | null, year: string | null, description: string | null, status: string | null, bookType: string | null, monitored: boolean, isManga: boolean, universe?: string | null, seriesGroup?: string | null, matchState?: string, hasCustomCover?: boolean, genres?: string[]}>({
     name: "", cover: null, cvId: null, metadataId: null, metadataSource: 'COMICVINE', path: null, id: null, isFavorite: false, isFollowing: false, publisher: null, year: null, description: null, status: null, bookType: null, monitored: false, isManga: false, matchState: 'MATCHED', hasCustomCover: false, genres: []
   });
@@ -104,6 +115,8 @@ function SeriesContent() {
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isMatching, setIsMatching] = useState(false);
+  // A re-match whose folder another series already owns (409 from match-series): attach or rename.
+  const [collisionPrompt, setCollisionPrompt] = useState<{ item: any; collision: FolderCollision } | null>(null);
   
   const [searchPage, setSearchPage] = useState(1);
   const [hasMoreSearch, setHasMoreSearch] = useState(false);
@@ -120,8 +133,9 @@ function SeriesContent() {
   const [reportDescription, setReportDescription] = useState("");
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
 
-  const [requestingIds, setRequestingIds] = useState<Set<number>>(new Set());
-  const [requestedIds, setRequestedIds] = useState<Set<number>>(new Set());
+  // Issue ids are strings (row ids); the old Set<number> typing predated that and only survived on `any`.
+  const [requestingIds, setRequestingIds] = useState<Set<string>>(new Set());
+  const [requestedIds, setRequestedIds] = useState<Set<string>>(new Set());
 
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
@@ -268,12 +282,24 @@ function SeriesContent() {
     document.title = "Omnibus - Series";
     const savedView = localStorage.getItem('omnibus-series-view') as 'grid' | 'list';
     if (savedView === 'grid' || savedView === 'list') setViewMode(savedView);
+    try {
+        const savedSort = parseIssueSortMode(localStorage.getItem(ISSUE_SORT_STORAGE_KEY));
+        if (savedSort) setSortMode(savedSort);
+    } catch { /* private mode */ }
   }, [loading]);
 
   const toggleViewMode = (mode: 'grid' | 'list') => {
       setViewMode(mode);
       localStorage.setItem('omnibus-series-view', mode);
   };
+
+  const changeSortMode = (mode: IssueSortMode) => {
+      setSortMode(mode);
+      try { localStorage.setItem(ISSUE_SORT_STORAGE_KEY, mode); } catch { /* private mode */ }
+  };
+
+  const sortedDownloaded = useMemo(() => sortIssuesForDisplay(downloadedIssues, sortMode), [downloadedIssues, sortMode]);
+  const sortedMissing = useMemo(() => sortIssuesForDisplay(missingIssues, sortMode), [missingIssues, sortMode]);
 
   useEffect(() => {
     if (!folderPath) return;
@@ -288,6 +314,7 @@ function SeriesContent() {
             setDuplicates(data.duplicates || []);
           setCollectedEditions(data.collectedEditions || []);
           setMissingCollectedEditions(data.missingCollectedEditions || []);
+          setCoveredIssues(data.coveredIssues || []);
             
             setSeriesInfo({
                 name: data.seriesName || data.name || "Unknown Series",
@@ -411,9 +438,20 @@ function SeriesContent() {
           setDuplicates(data.duplicates || []);
           setCollectedEditions(data.collectedEditions || []);
           setMissingCollectedEditions(data.missingCollectedEditions || []);
+          setCoveredIssues(data.coveredIssues || []);
       } catch (e) {
           Logger.log(`[Series] Couldn't refresh the issue lists after an attachment change: ${getErrorMessage(e)}`, 'debug');
       }
+  };
+
+  // #203 COLLECTED coverage: the Covers field saved (the server's canonical value comes back).
+  // The book keeps it locally at once; an owned book's coverage moves issues between missing and
+  // covered, so the lists are re-read quietly.
+  const handleCoverageSaved = (bookId: string, next: string | null) => {
+      const patch = (list: any[]) => list.map(b => b.id === bookId ? { ...b, coversIssues: next } : b);
+      setCollectedEditions(prev => patch(prev));
+      setMissingCollectedEditions(prev => patch(prev));
+      void reloadIssues();
   };
 
   const handleScanDirectory = async () => {
@@ -430,6 +468,7 @@ function SeriesContent() {
           setDownloadedIssues(data.downloadedIssues || []);
           setMissingIssues(data.missingIssues || []);
           
+          setCoveredIssues(data.coveredIssues || []);
           setSeriesInfo(prev => ({
               ...prev,
               name: data.seriesName || data.name || prev.name,
@@ -500,6 +539,7 @@ function SeriesContent() {
         if (!refData.error) {
           setDownloadedIssues(refData.downloadedIssues || []);
           setMissingIssues(refData.missingIssues || []);
+          setCoveredIssues(refData.coveredIssues || []);
         }
       } catch {}
 
@@ -848,12 +888,12 @@ function SeriesContent() {
       }
   }
 
-  const handleMatch = async (item: any) => {
+  const handleMatch = async (item: any, resolution?: CollisionResolution) => {
       setIsMatching(true);
       try {
           const safeYear = item.year ? item.year.toString() : new Date().getFullYear().toString();
           const safePublisher = item.publisher || "Unknown";
-          
+
           const res = await fetch('/api/library/match-series', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -863,12 +903,24 @@ function SeriesContent() {
                   metadataSource: searchProvider,
                   name: item.name || "Unknown",
                   year: safeYear,
-                  publisher: safePublisher
+                  publisher: safePublisher,
+                  ...(resolution ? { collision: resolution } : {})
               })
           });
           const data = await res.json();
+          if (res.status === 409 && data.collision) {
+              // The folder another series owns: ask — attach as a collected edition, or a name of its own.
+              setCollisionPrompt({ item, collision: data.collision });
+              setIsMatching(false);
+              return;
+          }
           if (data.success) {
-              toast({ title: "Series Matched!" });
+              setCollisionPrompt(null);
+              if (data.attachedTo) {
+                  toast({ title: "Added as a collected edition", description: `${item.name} now sits under ${data.attachedTo.name} — ${data.moved} file(s) moved into its folder${data.conflicts > 0 ? `, ${data.conflicts} left in place` : ''}.` });
+              } else {
+                  toast({ title: "Series Matched!" });
+              }
               // No autoSync param: match-series already queued the METADATA_SYNC server-side, and a
               // second queue from this page raced it — two concurrent syncs interleaving on the same
               // issue rows was the corruption vector of issue #194.
@@ -1754,6 +1806,15 @@ function SeriesContent() {
                                       <div className="min-w-0 flex-1">
                                           <p className="text-sm font-bold text-foreground truncate" title={book.name}>{book.name}</p>
                                           <p className="text-xs text-muted-foreground">Vol. {book.number}</p>
+                                          {/* #203 COLLECTED coverage: which run issues this book reprints. Admins edit it in place. */}
+                                          <CoverageField
+                                              issueId={book.id}
+                                              bookLabel={book.name || `Vol. ${book.number}`}
+                                              value={book.coversIssues ?? null}
+                                              canEdit={isAdmin}
+                                              onSaved={(next) => handleCoverageSaved(book.id, next)}
+                                              className="mt-1"
+                                          />
                                       </div>
                                       {/* Collections sit outside the run's missing-issue math, so they
                                           need their own way to be asked for — searched by the book's
@@ -1781,6 +1842,7 @@ function SeriesContent() {
                   <div className="flex items-center justify-between border-b-2 border-border pb-4">
                       <h4 className="font-black flex items-center gap-2 text-xl text-foreground tracking-tight"><Layers className="w-6 h-6 text-primary"/> Downloaded Issues ({downloadedIssues.length})</h4>
                       <div className="flex items-center gap-2 shrink-0">
+                      <IssueSortControl value={sortMode} onChange={changeSortMode} />
                       {canDownload && downloadedIssues.some(i => i.fullPath) && (
                           <Button
                               size="sm"
@@ -1808,7 +1870,7 @@ function SeriesContent() {
 
                   {viewMode === 'grid' ? (
                       <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6 pb-4">
-                          {downloadedIssues.map((issue) => {
+                          {sortedDownloaded.map((issue) => {
                               const isSelected = activeIssue?.id === issue.id || selectedIssues.has(issue.id);
                               const isRead = issue.isRead || (issue.readProgress || 0) >= 100;
                               return (
@@ -1837,7 +1899,7 @@ function SeriesContent() {
                                       {issue.readProgress > 0 && !isRead && <div className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/50"><div className="h-full bg-primary" style={{ width: `${issue.readProgress}%` }} /></div>}
                                     </div>
                                     <div className="flex flex-col justify-between flex-1 py-1 min-w-0">
-                                      <div><h5 className={cn("font-bold text-base line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</h5>{issue.parsedNum !== null && <span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</span>}</div>
+                                      <div><h5 className={cn("font-bold text-base line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</h5>{issue.parsedNum !== null && <span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{laneLabel(issue)} #{issue.parsedNum}</span>}</div>
                                       <div className="flex flex-wrap items-center gap-1.5 mt-3">
                                         <Button size="sm" variant={isSelected && !isSelectionMode ? "default" : "outline"} className="flex-1 font-bold shadow-md min-w-[70px]" asChild onClick={(e) => { if (isSelectionMode) { e.preventDefault(); } else { e.stopPropagation(); } }}>
                                             <Link href={`/reader?path=${encodeURIComponent(issue.fullPath)}&series=${encodeURIComponent(folderPath || '')}`}>
@@ -1884,7 +1946,7 @@ function SeriesContent() {
                                       </tr>
                                   </thead>
                                   <tbody className="divide-y divide-border">
-                                      {downloadedIssues.map((issue) => {
+                                      {sortedDownloaded.map((issue) => {
                                           const isSelected = activeIssue?.id === issue.id || selectedIssues.has(issue.id);
                                           const isRead = issue.isRead || (issue.readProgress || 0) >= 100;
                                           return (
@@ -1915,7 +1977,7 @@ function SeriesContent() {
                                                   </td>
                                                   <td className="px-4 py-3 font-bold">
                                                       <div className={cn("line-clamp-2 leading-tight", isRead ? 'text-muted-foreground' : 'text-foreground')}>{issue.name}</div>
-                                                      {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</div>}
+                                                      {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{laneLabel(issue)} #{issue.parsedNum}</div>}
                                                   </td>
                                                   <td className="px-4 py-3 text-center">
                                                       {isRead ? <Badge className="bg-green-600 border-0 text-[9px] px-1 h-4"><Check className="w-3 h-3 mr-1"/> Read</Badge> : issue.readProgress > 0 ? <Badge className="bg-primary border-0 text-primary-foreground text-[9px] px-1 h-4">{Math.round(issue.readProgress)}%</Badge> : <span className="text-muted-foreground text-xs">-</span>}
@@ -2002,17 +2064,20 @@ function SeriesContent() {
                               <CheckCircle2 className="w-10 h-10 text-green-500 mb-3" />
                               <p className="text-lg font-black text-green-800 dark:text-green-400 uppercase tracking-tight">Your collection is complete!</p>
                               <p className="text-sm text-green-700/70 dark:text-green-500/70 mt-1">All known issues are currently in your library.</p>
+                              {coveredIssues.length > 0 && (
+                                  <p className="text-xs text-green-700/70 dark:text-green-500/70 mt-1">{coveredIssues.length} of them only as part of a collected edition you own — listed below.</p>
+                              )}
                           </div>
                       ) : viewMode === 'grid' ? (
                           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6 pb-10">
-                              {missingIssues.map((issue) => {
+                              {sortedMissing.map((issue) => {
                                   const isRequesting = requestingIds.has(issue.id);
                                   const isAlreadyRequested = requestedIds.has(issue.id);
                                   return (
                                       <div key={issue.id} onClick={() => setActiveIssue(issue)} className="flex gap-4 p-4 bg-muted/30 border border-border/50 rounded-xl shadow-sm opacity-80 hover:opacity-100 transition-all cursor-pointer">
                                         <div className="w-20 h-28 shrink-0 rounded-md overflow-hidden bg-muted border border-border grayscale">{issue.coverUrl || seriesInfo.cover ? <img src={issue.coverUrl || seriesInfo.cover} onError={coverImgError(seriesInfo.cover)} className="w-full h-full object-cover" alt="" /> : <ImageIcon className="w-8 h-8 m-auto mt-10 text-muted-foreground/50" />}</div>
                                         <div className="flex flex-col justify-between flex-1 py-1 min-w-0">
-                                            <div><h5 className="font-bold text-base line-clamp-2 text-foreground leading-tight">{issue.name}</h5><span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</span></div>
+                                            <div><h5 className="font-bold text-base line-clamp-2 text-foreground leading-tight">{issue.name}</h5><span className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{laneLabel(issue)} #{issue.parsedNum}</span></div>
                                             <div className="flex flex-wrap items-center gap-2 mt-3">{isAlreadyRequested ? <Button size="sm" variant="secondary" disabled className="flex-1 h-9 bg-green-50 text-green-700 dark:bg-green-900/20 border-green-200 opacity-100 cursor-not-allowed"><Check className="w-4 h-4 mr-2"/> Queued</Button> : <Button size="sm" variant="outline" className="flex-1 h-9 font-black text-[10px] border-border hover:bg-muted uppercase tracking-wider min-w-[80px]" onClick={(e) => { e.stopPropagation(); handleRequestMissing(issue); }} disabled={isRequesting}>{isRequesting ? <Loader2 className="w-4 h-4 animate-spin mr-2"/> : <CloudDownload className="w-4 h-4 mr-2"/>}Request</Button>}</div>
                                         </div>
                                       </div>
@@ -2031,7 +2096,7 @@ function SeriesContent() {
                                           </tr>
                                       </thead>
                                       <tbody className="divide-y divide-border">
-                                          {missingIssues.map((issue) => {
+                                          {sortedMissing.map((issue) => {
                                               const isRequesting = requestingIds.has(issue.id);
                                               const isAlreadyRequested = requestedIds.has(issue.id);
                                               return (
@@ -2043,7 +2108,7 @@ function SeriesContent() {
                                                       </td>
                                                       <td className="px-4 py-3 font-bold">
                                                           <div className="line-clamp-2 leading-tight text-foreground">{issue.name}</div>
-                                                          {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{issue.isAnnual ? 'Annual' : 'Issue'} #{issue.parsedNum}</div>}
+                                                          {issue.parsedNum !== null && <div className="text-[10px] mt-1 font-black text-muted-foreground uppercase tracking-widest">{laneLabel(issue)} #{issue.parsedNum}</div>}
                                                       </td>
                                                       <td className="px-4 py-3 text-right">
                                                           {isAlreadyRequested ? (
@@ -2066,11 +2131,34 @@ function SeriesContent() {
                       )}
                   </div>
               )}
+
+              {/* #203 COLLECTED coverage: the singles an owned collection reprints — not missing, not on disk. */}
+              {seriesInfo.cvId && (
+                  <CoveredIssuesSection
+                      issues={coveredIssues}
+                      seriesName={seriesInfo.name}
+                      seriesCover={seriesInfo.cover}
+                      canRequest={!!canRequest}
+                      requestingIds={requestingIds}
+                      requestedIds={requestedIds}
+                      onRequest={(issue) => { void handleRequestMissing(issue); }}
+                      onSelect={(issue) => setActiveIssue(issue)}
+                  />
+              )}
           </div>
         </div>
       )}
 
       {/* --- DIALOGS --- */}
+
+      {/* A re-match whose folder another series already owns: attach as a collected edition, or a folder name of its own. */}
+      <FolderCollisionDialog
+          open={!!collisionPrompt}
+          collision={collisionPrompt?.collision ?? null}
+          busy={isMatching}
+          onCancel={() => { if (!isMatching) setCollisionPrompt(null); }}
+          onResolve={(resolution) => { if (collisionPrompt) void handleMatch(collisionPrompt.item, resolution); }}
+      />
 
       {/* Admin: move the selected issues to another series (fixes mis-filed/merged issues) */}
       <Dialog open={moveDialogOpen} onOpenChange={(o) => { setMoveDialogOpen(o); if (!o) { setMoveSearch(""); setMoveResults([]); setMoveTargetId(null); setMoveNewName(""); } }}>

@@ -63,6 +63,7 @@ model User {
   koreaderSyncs       KoreaderSync[]
   readerPreferences   ReaderPreference[]
   libraryAccess       UserLibraryAccess[]
+  recommendationDismissals RecommendationDismissal[]
 }
 
 model ApiKey {
@@ -229,11 +230,13 @@ model Series {
   hasCustomMetadata Boolean @default(false) // Series was manually curated in the metadata editor; auto-sync must not overwrite its narrative fields
   hasCustomCover  Boolean @default(false) // Admin uploaded a custom cover.jpg; extraction + provider-sync must never overwrite it
   lastMetadataSync DateTime? // Last successful provider sync (UTC); keys incremental fetches (Metron modified_gt)
+  creditsSyncedAt DateTime? // Last time the volume's people/characters were written to SeriesCredit (null = never asked with those fields; the scheduled sweep backfills)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @default(now()) @updatedAt
 
   issues          Issue[]
   attachedVolumes AttachedVolume[]
+  credits         SeriesCredit[]
   favorites       Favorite[]
   follows         SeriesFollow[]
   collectionItems CollectionItem[]
@@ -307,6 +310,11 @@ model Issue {
   alternateNumber String?  // ComicInfo <AlternateNumber>
   alternateCount  Int?     // ComicInfo <AlternateCount>
   storyArcNumber  String?  // ComicInfo <StoryArcNumber>
+  // #203 COLLECTED coverage (field report by robotshavehearts2): which MAIN-RUN issue numbers this
+  // collected book reprints — "1-6, 8". Meaningful only on a book of a COLLECTED attachment. An owned
+  // book's coverage takes those issues out of "missing". Curation: prefilled from the provider's
+  // "Collects #1-6" text once, never overwritten by a sync, carried in series.json for restore.
+  coversIssues    String?
   gtin            String?  // ComicInfo <GTIN> (ISBN/ISSN/EAN — per-file by nature)
   notes           String?  // ComicInfo <Notes> (per-file tagger provenance survives embeds now)
   scanInformation String?  // ComicInfo <ScanInformation>
@@ -356,6 +364,43 @@ model AttachedVolume {
 
   @@unique([seriesId, metadataSource, volumeId])
   @@index([seriesId])
+}
+
+// Library-aware recommendations (field report by robotshavehearts2): the provider's own
+// volume-level credits — every person and character on the volume, with the provider's appearance
+// count as the weight. Provider FACTS in a side table: never curated, never embedded, written on
+// every volume sync regardless of hasCustomMetadata/file-priority locks. The Series.characters /
+// writers JSON columns are ComicInfo fallbacks and stay untouched. One row per (series, source,
+// kind, provider id); the [kind, providerId] index serves the library-wide "which series share
+// this person/character" aggregation the recommender runs.
+model SeriesCredit {
+  id         String   @id @default(cuid())
+  seriesId   String
+  series     Series   @relation(fields: [seriesId], references: [id], onDelete: Cascade)
+  source     String   @default("COMICVINE") // provider the id belongs to
+  kind       String   // "PERSON" | "CHARACTER"
+  providerId String   // ComicVine person (4040-) / character (4005-) id, without the prefix
+  name       String
+  count      Int      @default(0) // provider's appearance count within this volume
+  updatedAt  DateTime @default(now()) @updatedAt
+
+  @@unique([seriesId, source, kind, providerId])
+  @@index([kind, providerId])
+  @@index([seriesId])
+}
+
+// A user's "not interested" on a library-aware recommendation (Beta B). Per user — the shelf is
+// library-level, the dismissal is personal — and permanent for that provider volume until undone.
+model RecommendationDismissal {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  source    String   @default("COMICVINE")
+  volumeId  String   // provider volume id, without the 4050- prefix
+  createdAt DateTime @default(now())
+
+  @@unique([userId, source, volumeId])
+  @@index([userId])
 }
 
 model IssueReport {

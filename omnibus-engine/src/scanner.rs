@@ -266,7 +266,7 @@ fn is_numeric_entity(s: &str) -> bool {
 /// VOLUME id per the Mylar spec — a direct, zero-API series match that works even when the folder's
 /// archives are RAR/CBR (where ComicInfo.xml can't be read pre-conversion).
 #[derive(Debug, Default)]
-struct SeriesJsonInfo {
+pub(crate) struct SeriesJsonInfo {
     comicid: Option<i64>,
     name: Option<String>,
     publisher: Option<String>,
@@ -279,17 +279,20 @@ struct SeriesJsonInfo {
     /// file says WHICH volumes are attached to this series; each annual file's ComicInfo says which
     /// one it came from. Absent in a foreign (Mylar-written) series.json, which is the point of the
     /// namespace.
-    attached_volumes: Vec<AttachedVolumeSeed>,
+    pub(crate) attached_volumes: Vec<AttachedVolumeSeed>,
 }
 
 /// One attachment as recorded in series.json.
 #[derive(Debug, Clone)]
-struct AttachedVolumeSeed {
-    source: String,
-    volume_id: String,
-    kind: String,
-    name: Option<String>,
-    start_year: Option<i32>,
+pub(crate) struct AttachedVolumeSeed {
+    pub(crate) source: String,
+    pub(crate) volume_id: String,
+    pub(crate) kind: String,
+    pub(crate) name: Option<String>,
+    pub(crate) start_year: Option<i32>,
+    /// #203 COLLECTED coverage: (provider issue id, covers) per book that had coverage when the
+    /// file was written — the lane sync restores it onto the recreated book rows with no calls.
+    pub(crate) books: Vec<(String, String)>,
 }
 
 fn parse_series_json(content: &str) -> Option<SeriesJsonInfo> {
@@ -320,12 +323,22 @@ fn parse_series_json(content: &str) -> Option<SeriesJsonInfo> {
                         .and_then(|x| x.as_str().map(str::to_string).or_else(|| x.as_i64().map(|n| n.to_string())))
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())?;
+                    let books = e.get("books").and_then(|b| b.as_array())
+                        .map(|arr| arr.iter().filter_map(|b| {
+                            let id = b.get("issue_id")
+                                .and_then(|x| x.as_str().map(str::to_string).or_else(|| x.as_i64().map(|n| n.to_string())))
+                                .map(|s| s.trim().to_string()).filter(|s| !s.is_empty())?;
+                            let covers = b.get("covers").and_then(|x| x.as_str()).map(str::trim).filter(|s| !s.is_empty())?;
+                            Some((id, covers.to_string()))
+                        }).collect())
+                        .unwrap_or_default();
                     Some(AttachedVolumeSeed {
                         source: e.get("source").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).unwrap_or("COMICVINE").to_string(),
                         volume_id,
                         kind: e.get("kind").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).unwrap_or("ANNUAL").to_string(),
                         name: e.get("name").and_then(|x| x.as_str()).filter(|s| !s.is_empty()).map(str::to_string),
                         start_year: e.get("start_year").and_then(|x| x.as_i64()).map(|y| y as i32).filter(|y| *y != 0),
+                        books,
                     })
                 })
                 .collect()
@@ -345,7 +358,7 @@ fn parse_series_json(content: &str) -> Option<SeriesJsonInfo> {
 
 /// Reads `<folder>/series.json` if present. Any read/parse failure is a None (the scan proceeds on
 /// ComicInfo/folder-name evidence), but a malformed file in a tagged library is worth a log line.
-fn read_series_json(folder: &Path) -> Option<SeriesJsonInfo> {
+pub(crate) fn read_series_json(folder: &Path) -> Option<SeriesJsonInfo> {
     let path = folder.join("series.json");
     let content = std::fs::read_to_string(&path).ok()?;
     let parsed = parse_series_json(&content);
@@ -722,6 +735,22 @@ fn restamp_credit_complete_sql() -> &'static str {
          AND "seriesId" IN (SELECT id FROM "Series" WHERE "libraryId" = $1)"#
 }
 
+/// 5K (#203, the beta.010 regression — anacronismo 2026-09-10): deletes the TWIN rows the Node
+/// series-page sync used to create — an unattached row sharing its file with a row that belongs to
+/// an attached lane. A file has ONE row; the attached one carries the provider link the user made
+/// by hand, so it is the one that stays. Library-scoped like every other scan pass; portable
+/// correlated subquery (no DELETE … JOIN, which SQLite lacks).
+fn attached_twin_heal_sql() -> &'static str {
+    r#"DELETE FROM "Issue"
+       WHERE "attachedVolumeId" IS NULL
+         AND "filePath" IS NOT NULL AND "filePath" <> ''
+         AND "seriesId" IN (SELECT id FROM "Series" WHERE "libraryId" = $1)
+         AND EXISTS (SELECT 1 FROM "Issue" o
+                     WHERE o."seriesId" = "Issue"."seriesId"
+                       AND o."attachedVolumeId" IS NOT NULL
+                       AND o."filePath" = "Issue"."filePath")"#
+}
+
 fn issue_file_meta(info: Option<&ScanComicInfo>) -> IssueFileMeta {
     let Some(i) = info else { return IssueFileMeta::default() };
     let text = |s: &Option<String>| s.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
@@ -1082,7 +1111,10 @@ fn strip_leading_zeros(s: &str) -> String {
 /// glued into a longer word: series "No" must never half-consume "Nova"). Tokens are the series
 /// name's ASCII-alphanumeric runs, so "Kaiju No. 8" matches "Kaiju No.8", "kaiju_no_8", etc.
 /// Non-ASCII series names yield no tokens and never strip — a safe no-op.
-fn strip_series_prefix(file_name: &str, series: &str) -> Option<String> {
+/// Token-prefix match: `Some(rest)` when `file_name` starts with every token of `series` (case and
+/// separators ignored, glue-guarded so "Batman" never matches "Batmanx"). Shared with the attached
+/// lane's name-anchored claim (attached_volumes.rs) — the same rule decides what a filename names.
+pub(crate) fn strip_series_prefix(file_name: &str, series: &str) -> Option<String> {
     let tokens: Vec<String> = series
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|s| !s.is_empty())
@@ -1114,7 +1146,7 @@ fn issue_number_from_filename(file_name: &str, series_hint: Option<&str>) -> Str
     issue_descriptor_from_filename(file_name, series_hint).0
 }
 
-fn issue_descriptor_from_filename(file_name: &str, series_hint: Option<&str>) -> (String, bool) {
+pub(crate) fn issue_descriptor_from_filename(file_name: &str, series_hint: Option<&str>) -> (String, bool) {
     // Issue #200: "#½" must parse as "#0.5" instead of falling through every digit rule to the
     // "1" default. Normalized once here (idempotent through the recursive hint call below).
     let normalized = crate::metadata::normalize_fraction_numbers(file_name);
@@ -1169,11 +1201,15 @@ fn issue_descriptor_from_filename_unhinted(file_name: &str) -> (String, bool) {
     });
     let re_num = RE_NUM.get_or_init(|| Regex::new(r"\d+(?:\.\d+)?[a-zA-Z]?").unwrap());
 
-    // 1. Strip a trailing extension.
+    // 1. Strip a trailing extension. #205: an extension STARTS WITH A LETTER — a numeric tail
+    //    ("Bone (1991) 13.5" handed over without its extension) is the issue number, not ".5".
+    //    Parity: issue-parser.ts describeIssueFromFilename.
     let mut clean = file_name.to_string();
     if let Some(dot) = clean.rfind('.') {
         let ext = &clean[dot + 1..];
-        if !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        if ext.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+            && ext.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        {
             clean = clean[..dot].to_string();
         }
     }
@@ -2760,6 +2796,22 @@ pub async fn scan_library(db: Db, library_path: String, library_id: String, spec
     }
 
     // ---------------------------------------------------------
+    // 5K. HEAL ATTACHED-LANE TWINS (#203 — the beta.010 regression, anacronismo 2026-09-10)
+    // ---------------------------------------------------------
+    // The Node series-page sync keyed an attached lane's rows by their lane but the folder's files
+    // by their filename, so every visit after an attach created a second, unmatched row for the
+    // SAME path ("38 local annual files still unattached"; Diagnostics listing one path twice).
+    // The route now matches by path and heals its own series on the next visit; this pass heals the
+    // whole library in one scan, so nobody has to open every series to get clean.
+    match sqlx::query(attached_twin_heal_sql()).bind(&library_id).execute(&db.pool).await {
+        Ok(r) if r.rows_affected() > 0 => {
+            log::info!("[Scan] Healed {} attached-lane twin row(s): unattached rows that shared a file with an attached row (#203, beta.010 regression).", r.rows_affected());
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("[Scan] Attached-lane twin heal failed: {:?}", e),
+    }
+
+    // ---------------------------------------------------------
     // 5G. RE-STAMP CREDIT-COMPLETE ISSUES (discussion #182 — local-first ingest)
     // ---------------------------------------------------------
     // Libraries scanned by pre-beta.090 builds carry issues whose ComicInfo credits already sit in
@@ -3085,6 +3137,47 @@ mod tests {
             .fetch_all(&pool).await.unwrap()
             .iter().map(|r| r.get::<String, _>("id")).collect();
         assert_eq!(promoted, vec!["i1", "i2", "i6"]);
+    }
+
+    // ==== #203, the beta.010 regression: the 5K twin heal deletes exactly the unattached rows that
+    // share a file with an attached-lane row, in this library only. ====
+    #[tokio::test]
+    async fn attached_twin_heal_deletes_only_unattached_rows_sharing_an_attached_rows_file() {
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(sqlx::any::install_default_drivers);
+        let pool = sqlx::any::AnyPoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query(r#"CREATE TABLE "Series" (id TEXT PRIMARY KEY, "libraryId" TEXT)"#).execute(&pool).await.unwrap();
+        sqlx::query(r#"CREATE TABLE "Issue" (id TEXT PRIMARY KEY, "seriesId" TEXT, "filePath" TEXT, "attachedVolumeId" TEXT)"#).execute(&pool).await.unwrap();
+        for (id, lib) in [("s1", "lib1"), ("s2", "lib1"), ("s3", "lib2")] {
+            sqlx::query(r#"INSERT INTO "Series" (id, "libraryId") VALUES ($1, $2)"#).bind(id).bind(lib).execute(&pool).await.unwrap();
+        }
+        for (id, sid, fp, att) in [
+            // s1: the claimed annual and the twin the old page sync made for the same file.
+            ("claimed", "s1", Some("/c/s1/Annual 001.cbz"), Some("att1")),
+            ("twin", "s1", Some("/c/s1/Annual 001.cbz"), None::<&str>),
+            // s1: an unattached annual with its own file — nobody's twin.
+            ("loner", "s1", Some("/c/s1/Annual 002.cbz"), None),
+            // s1: a WANTED skeleton in the lane (no file) and a main-run file — untouched.
+            ("skeleton", "s1", None::<&str>, Some("att1")),
+            ("main", "s1", Some("/c/s1/001.cbz"), None),
+            // s2: same path text as s1's annual but a different series — a twin only within ITS series.
+            ("other_series", "s2", Some("/c/s1/Annual 001.cbz"), None),
+            // s3 (other library): a real twin, but out of this scan's scope.
+            ("foreign_claimed", "s3", Some("/c/s3/Annual 001.cbz"), Some("att3")),
+            ("foreign_twin", "s3", Some("/c/s3/Annual 001.cbz"), None),
+        ] {
+            sqlx::query(r#"INSERT INTO "Issue" (id, "seriesId", "filePath", "attachedVolumeId") VALUES ($1, $2, $3, $4)"#)
+                .bind(id).bind(sid).bind(fp).bind(att).execute(&pool).await.unwrap();
+        }
+
+        let res = sqlx::query(attached_twin_heal_sql()).bind("lib1").execute(&pool).await.unwrap();
+        assert_eq!(res.rows_affected(), 1, "exactly the twin goes");
+        let left: Vec<String> = sqlx::query(r#"SELECT id FROM "Issue" ORDER BY id"#)
+            .fetch_all(&pool).await.unwrap()
+            .iter().map(|r| r.get::<String, _>("id")).collect();
+        assert_eq!(left, vec!["claimed", "foreign_claimed", "foreign_twin", "loner", "main", "other_series", "skeleton"]);
     }
 
     #[tokio::test]
@@ -3453,6 +3546,22 @@ mod tests {
         assert_eq!(issue_number_from_filename("Vol 3.cbz", None), "3");
         assert_eq!(issue_number_from_filename("007.cbz", None), "7");
         assert_eq!(issue_number_from_filename("Amazing Series 12a.cbz", None), "12a");
+    }
+
+    // #205 (BeepbopbeepityBop): a numeric tail is never an extension — "Bone (1991) 13.5" handed
+    // over without its extension must not lose the ".5" to the extension strip. Only a known
+    // archive extension is stripped. Parity with the Node #205 extractor tests.
+    #[test]
+    fn issue_number_keeps_a_decimal_when_the_name_has_no_extension() {
+        assert_eq!(issue_number_from_filename("Bone (1991) 13.5", None), "13.5");
+        assert_eq!(issue_number_from_filename("Bone (1991) 13.5", Some("Bone")), "13.5");
+        assert_eq!(issue_number_from_filename("Wizard #1½", None), "1.5");
+        // Real extensions still go, whatever their case; a dotted title is not an extension.
+        assert_eq!(issue_number_from_filename("Bone (1991) 13.5.cbz", None), "13.5");
+        assert_eq!(issue_number_from_filename("Batman 001.CBR", None), "1");
+        assert_eq!(issue_number_from_filename("Saga 012.cb7", None), "12");
+        assert_eq!(issue_number_from_filename("Mr. Punch 003", None), "3");
+        assert_eq!(issue_number_from_filename("Kaiju No. 8 v02", Some("Kaiju No. 8")), "2");
     }
 
     // Mirrors Node __tests__/lib/utils/issue-parser.test.ts (beta.023/035 negative-number support).

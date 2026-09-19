@@ -19,6 +19,9 @@ import { getErrorMessage } from "@/lib/utils/error"
 import { extractIssueNumber } from "@/lib/utils/issue-parser"
 import { buildManualSuggestion, buildKeepCarry, cleanProviderId, findIssueIdByNumber, resolveIssueIdByNumber, acceptableForBulk, seriesQueryFromName, pickSuggestion } from "@/lib/utils/smart-match-search"
 import SmartMatchMetadataDialog, { type SmartMatchOverride, buildFolderPreview, shouldEmbedIssueCover, COMIC_INFO_DEFAULT_KEYS } from "@/components/smart-match-metadata-dialog"
+import { FolderCollisionDialog, type FolderCollision, type CollisionResolution } from "@/components/folder-collision-dialog"
+import { AttachLocalCollectedDialog } from "@/components/attach-local-collected-dialog"
+import { BookMarked } from "lucide-react"
 import SmartMatchBoundIssue from "@/components/smart-match-bound-issue"
 import { ConfirmationDialog } from "@/components/ui/confirmation-dialog"
 
@@ -100,6 +103,12 @@ export default function SmartMatchPage() {
     const [suggestions, setSuggestions] = useState<Record<string, any>>({});
     const [isScanning, setIsScanning] = useState(false);
     const [processingId, setProcessingId] = useState<string | null>(null);
+    // A match whose folder another series already owns (409 from match-series): the admin chooses
+    // attach-as-collected or a folder name of its own, and the accept is re-sent with that choice.
+    const [collisionPrompt, setCollisionPrompt] = useState<{ series: any; suggestion: any; collision: FolderCollision } | null>(null);
+    const [collisionBusy, setCollisionBusy] = useState(false);
+    // A trade the provider has no volume for: attach it to a series of yours by name, as a LOCAL collected edition.
+    const [localAttachItem, setLocalAttachItem] = useState<any | null>(null);
     const [loading, setLoading] = useState(true);
 
     const [manualMatchOpen, setManualMatchOpen] = useState(false);
@@ -520,7 +529,7 @@ export default function SmartMatchPage() {
         };
     };
 
-    const handleAcceptMatch = async (series: any, suggestion: any) => {
+    const handleAcceptMatch = async (series: any, suggestion: any, opts?: { resolution?: CollisionResolution; promptOnCollision?: boolean }) => {
         setProcessingId(series.id);
         try {
             Logger.log(`[Smart Match Debug] Accepting match for "${series.name}". Linking to ${suggestion.metadataSource || 'COMICVINE'} ID: ${suggestion.id}`, 'debug');
@@ -528,12 +537,19 @@ export default function SmartMatchPage() {
             const res = await fetch('/api/library/match-series', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(await buildMatchPayload(series, suggestion))
+                body: JSON.stringify({ ...(await buildMatchPayload(series, suggestion)), ...(opts?.resolution ? { collision: opts.resolution } : {}) })
             });
 
             if (res.ok) {
                 const result = await res.json().catch(() => ({}));
-                if (result.conflicts > 0) {
+                if (result.attachedTo) {
+                    // The collision's usual answer: the volume went UNDER the series that owns the folder.
+                    toast({
+                        title: "Added as a collected edition",
+                        description: `${suggestion.name} now sits under ${result.attachedTo.name} — ${result.moved} file(s) moved into its folder${result.conflicts > 0 ? `, ${result.conflicts} left in place (name already taken)` : ''}.`,
+                        variant: result.conflicts > 0 ? "destructive" : undefined,
+                    });
+                } else if (result.conflicts > 0) {
                     toast({ title: "Matched with conflicts", description: `${suggestion.name} was linked, but ${result.conflicts} duplicate file(s) were left in place (not overwritten). Check the logs.`, variant: "destructive" });
                 } else {
                     toast({ title: "Matched Successfully!", description: `${suggestion.name} has been linked and organized.` });
@@ -541,7 +557,13 @@ export default function SmartMatchPage() {
                 setUnmatched(prev => prev.filter(s => s.id !== series.id));
                 return true;
             } else {
-                const err = await res.json();
+                const err = await res.json().catch(() => ({}));
+                // The folder another series owns: ask, unless this is a bulk pass (then it's a failure
+                // the summary names, and the row stays for a single accept).
+                if (res.status === 409 && err.collision && opts?.promptOnCollision !== false) {
+                    setCollisionPrompt({ series, suggestion, collision: err.collision });
+                    return false;
+                }
                 toast({ title: "Match Failed", description: err.error, variant: "destructive" });
                 return false;
             }
@@ -563,7 +585,7 @@ export default function SmartMatchPage() {
             const suggestion = suggestions[id];
             
             if (series && suggestion && suggestion !== 'NOT_FOUND' && suggestion !== 'ERROR') {
-                const success = await handleAcceptMatch(series, suggestion);
+                const success = await handleAcceptMatch(series, suggestion, { promptOnCollision: false });
                 if (success) {
                     successCount++;
                 } else {
@@ -1347,6 +1369,16 @@ export default function SmartMatchPage() {
                                     <Button
                                         size="sm"
                                         variant="outline"
+                                        disabled={isSelectionMode}
+                                        className="flex-1 md:flex-none font-bold border-primary/30 text-primary hover:bg-primary/10"
+                                        onClick={(e) => { e.stopPropagation(); setLocalAttachItem(series); }}
+                                        title="Not on the provider? Put it under a series you have as a collected edition, by name"
+                                    >
+                                        <BookMarked className="w-4 h-4 md:mr-2" /> <span className="hidden md:inline">Attach to Series</span>
+                                    </Button>
+                                    <Button
+                                        size="sm"
+                                        variant="outline"
                                         disabled={isSelectionMode || pageManagerLoading}
                                         className="flex-1 md:flex-none font-bold border-primary/30 text-primary hover:bg-primary/10"
                                         onClick={(e) => { e.stopPropagation(); openPageManager([series]); }}
@@ -1822,6 +1854,36 @@ export default function SmartMatchPage() {
                 confirmText="Merge anyway"
                 cancelText="Cancel"
                 variant="destructive"
+            />
+
+            {/* FOLDER COLLISION — the computed folder belongs to another series; choose attach or a name. */}
+            <FolderCollisionDialog
+                open={!!collisionPrompt}
+                collision={collisionPrompt?.collision ?? null}
+                busy={collisionBusy}
+                onCancel={() => { if (!collisionBusy) setCollisionPrompt(null); }}
+                onResolve={async (resolution) => {
+                    if (!collisionPrompt) return;
+                    setCollisionBusy(true);
+                    try {
+                        const ok = await handleAcceptMatch(collisionPrompt.series, collisionPrompt.suggestion, { resolution, promptOnCollision: false });
+                        if (ok) setCollisionPrompt(null);
+                    } finally {
+                        setCollisionBusy(false);
+                    }
+                }}
+            />
+
+            {/* LOCAL COLLECTED EDITION — a trade the provider has no volume for, attached to a series by name. */}
+            <AttachLocalCollectedDialog
+                open={!!localAttachItem}
+                item={localAttachItem}
+                onClose={() => setLocalAttachItem(null)}
+                onDone={() => {
+                    const doneId = localAttachItem?.id;
+                    setUnmatched(prev => prev.filter(s => s.id !== doneId));
+                    setLocalAttachItem(null);
+                }}
             />
 
             {/* PER-ITEM METADATA EDITOR — fill Series Group / Universe / identity before accepting. */}

@@ -11,6 +11,8 @@ import { Logger } from '@/lib/logger';
 import { getErrorMessage } from '@/lib/utils/error';
 import { AuditLogger } from '@/lib/audit-logger';
 import { describeIssueFromFilename, normalizeFractionNumbers } from '@/lib/utils/issue-parser';
+import { attachmentForFilename } from '@/lib/utils/attachment-name';
+import { expandCoverage, isCovered } from '@/lib/utils/coverage';
 import { COMIC_EXT_REGEX } from '@/lib/utils/formats';
 import { sanitizeDescription, providerWikiBase } from '@/lib/utils/sanitize';
 import { safeParse } from '@/lib/utils/safe-parse';
@@ -117,6 +119,25 @@ export async function GET(request: Request) {
         const dbIssueMap = new Map();
         const idsToDelete: string[] = [];
 
+        // beta.010 REGRESSION HEAL (#203, anacronismo 2026-09-10). Rows of an ATTACHED lane are keyed
+        // `att:<attachment>:<n>` below, but the folder's FILES can only be keyed `annual:<n>` / `<n>` —
+        // so once an attach had claimed an annual file, every visit here failed to find that file's
+        // row under its file key and created a second, unmatched row for the SAME path (the
+        // Diagnostics screenshot: one path listed twice; "38 local annual files still unattached").
+        // A file has one row: an unattached row sharing its path with an attached one is that twin,
+        // and it goes. The path-first file sync further down is what stops new twins being born.
+        const samePath = (p: string) => p.replace(/\\/g, '/');
+        const attachedPaths = new Set<string>(
+            existingIssues.filter(i => i.attachedVolumeId && i.filePath).map(i => samePath(i.filePath))
+        );
+        const twinIds = existingIssues
+            .filter(i => !i.attachedVolumeId && i.filePath && attachedPaths.has(samePath(i.filePath)))
+            .map(i => i.id);
+        if (twinIds.length > 0) {
+            await prisma.issue.deleteMany({ where: { id: { in: twinIds } } }).catch(() => {});
+            existingIssues = existingIssues.filter(i => !twinIds.includes(i.id));
+        }
+
         // #203: the annual domain is part of the grouping key ("annual:1" vs "1") — before this,
         // a co-located "Batman Annual 001" and the real #1 landed in one group and the ranking
         // DELETED one of the rows every visit (row churn). ':' can't appear in a number, so the
@@ -125,9 +146,13 @@ export async function GET(request: Request) {
         // are the user's curation, so "Vol. 1" of a trade shares nothing but a digit with issue #1.
         // Keying attached rows by their attachment keeps each lane apart from the run and from every
         // other lane, which is what lets the same number exist in several of them at once.
+        // #205 (BeepbopbeepityBop): ComicVine numbers a half-issue "13½" while the file — and every
+        // parsed number — says "13.5". Keyed as raw strings they never met, so the page kept a
+        // matched row with no file beside an unmatched row holding the file. One number, one key.
+        const numKey = (n: unknown) => normalizeFractionNumbers(String(n ?? '')).replace(/^0+(?=\d)/, '');
         const issuesByNum = new Map<string, any[]>();
         for (const issue of existingIssues) {
-            const stdNum = issue.number.replace(/^0+(?=\d)/, '');
+            const stdNum = numKey(issue.number);
             const key = issue.attachedVolumeId
                 ? `att:${issue.attachedVolumeId}:${stdNum}`
                 : `${issue.isAnnual ? 'annual:' : ''}${stdNum}`;
@@ -171,21 +196,63 @@ export async function GET(request: Request) {
         const activeFilePaths = new Set();
         const creatingNums = new Set();
 
+        // Every surviving row's path, so the file sync can recognise an indexed file BEFORE it
+        // consults the number key. An attached row's key is its lane, which a bare filename can
+        // never produce — keying alone is exactly what created the twins healed above.
+        const deletedIds = new Set(idsToDelete);
+        const indexedPaths = new Set<string>(
+            existingIssues.filter(i => i.filePath && !deletedIds.has(i.id)).map(i => samePath(i.filePath))
+        );
+
         if (folderExists) {
             const files = await fs.promises.readdir(folderPath);
 
-            const filesByNum = new Map<string, { number: string; isAnnual: boolean; files: string[] }>();
+            // #203 name-anchored: which attached volume a FILENAME belongs to — a one-off named like
+            // its parent ("The Amazing Spider-Man '96 #001") carries no Annual token, and the name
+            // is the only signal. Such a file keys as its lane, so it never groups with the main
+            // run's same number (the '96-vs-1963 "#1 duplicate" from the field report), and if it
+            // has no row yet it is created in the lane's domain for the engine's claim to bind.
+            const attachmentRefs = await prisma.attachedVolume.findMany({
+                where: { seriesId: seriesRecord.id },
+                select: { id: true, name: true, kind: true, metadataSource: true },
+            });
+            // A LOCAL lane has no engine claim, so a new file whose name says it belongs to one is
+            // bound to it HERE, outright — a provider lane's file is still created unbound for the
+            // engine's id-anchored claim.
+            const localLaneIds = new Set(attachmentRefs.filter(a => (a as any).metadataSource === 'LOCAL').map(a => a.id));
+
+            // A file that already belongs to a row groups under THAT row's key — its lane, or its
+            // number — whatever its filename parses to. An OWNED trade in a lane named like its
+            // parent (the usual shape of a provider's "collected editions" volume) can't be
+            // name-claimed, so "Absolute Batman Vol. 3" read as run #3 and the page flagged it as
+            // a duplicate of issue #3 (#203 COLLECTED coverage walk, 2026-09-15).
+            const rowByPath = new Map<string, any>();
+            for (const i of existingIssues) {
+                if (i.filePath && !deletedIds.has(i.id)) rowByPath.set(samePath(i.filePath), i);
+            }
+
+            const filesByNum = new Map<string, { number: string; isAnnual: boolean; files: string[]; localLaneId?: string }>();
             for (const file of files) {
                 if (COMIC_EXT_REGEX.test(file)) {
                     // Series-name hint keeps title digits (Kaiju No. 8) out of the issue number —
                     // without it every volume parsed as #8 and collapsed into one dup-flagged row.
                     // #203: files group by (annual domain, number) — "Batman Annual 001" and
                     // "Batman 001" are different slots, not a duplicate pair.
-                    const desc = describeIssueFromFilename(file, seriesRecord?.name || undefined);
-                    const key = `${desc.isAnnual ? 'annual:' : ''}${desc.number}`;
+                    const owner = rowByPath.get(samePath(path.join(folderPath, file)));
+                    const lane = owner ? null : (attachmentRefs.length > 0 ? attachmentForFilename(file, seriesRecord?.name || '', attachmentRefs) : null);
+                    const desc = owner
+                        ? { number: String(owner.number), isAnnual: !!owner.isAnnual }
+                        : lane
+                            ? { number: lane.number, isAnnual: lane.kind === 'ANNUAL' }
+                            : describeIssueFromFilename(file, seriesRecord?.name || undefined);
+                    const key = owner
+                        ? (owner.attachedVolumeId
+                            ? `att:${owner.attachedVolumeId}:${numKey(desc.number)}`
+                            : `${desc.isAnnual ? 'annual:' : ''}${numKey(desc.number)}`)
+                        : lane ? `att:${lane.id}:${numKey(desc.number)}` : `${desc.isAnnual ? 'annual:' : ''}${numKey(desc.number)}`;
                     const entry = filesByNum.get(key);
                     if (entry) entry.files.push(file);
-                    else filesByNum.set(key, { number: desc.number, isAnnual: desc.isAnnual, files: [file] });
+                    else filesByNum.set(key, { number: desc.number, isAnnual: desc.isAnnual, files: [file], localLaneId: lane && localLaneIds.has(lane.id) ? lane.id : undefined });
                 }
             }
 
@@ -202,6 +269,10 @@ export async function GET(request: Request) {
                 const fullPath = path.join(folderPath, file);
                 activeFilePaths.add(fullPath);
 
+                // Path first: a file that already belongs to a row — attached lane or not — is
+                // indexed, whatever key its filename parses to.
+                if (indexedPaths.has(samePath(fullPath))) continue;
+
                 const existingIssue = dbIssueMap.get(key);
 
                 if (existingIssue) {
@@ -214,9 +285,10 @@ export async function GET(request: Request) {
                 } else if (!creatingNums.has(key)) {
                     createsToFire.push({
                         seriesId: seriesRecord.id,
-                        metadataId: `unmatched_${Math.random()}`,
-                        metadataSource: 'LOCAL',
-                        matchState: 'UNMATCHED',
+                        ...(group.localLaneId
+                            // A LOCAL lane's book: bound now, identified by lane and number (stable across a wipe).
+                            ? { attachedVolumeId: group.localLaneId, metadataId: `local_${group.localLaneId}_${group.number}`, metadataSource: 'LOCAL', matchState: 'MATCHED', name: `Vol. ${group.number}` }
+                            : { metadataId: `unmatched_${Math.random()}`, metadataSource: 'LOCAL', matchState: 'UNMATCHED' }),
                         number: group.number,
                         isAnnual: group.isAnnual,
                         status: "DOWNLOADED",
@@ -231,11 +303,15 @@ export async function GET(request: Request) {
         if (updateOperations.length > 0) await Promise.all(updateOperations);
 
         if (folderExists) {
+            // Both slash forms: the engine stores forward slashes on every platform, path.join emits
+            // the platform's — on a Windows dev box the raw form alone would miss every engine-written
+            // row and prune a file that is plainly on disk.
+            const activeBothForms = Array.from(activeFilePaths as Set<string>).flatMap(p => [p, samePath(p)]);
             await prisma.issue.deleteMany({
                 where: {
                     seriesId: seriesRecord.id,
                     metadataId: { startsWith: 'unmatched_' },
-                    filePath: { notIn: Array.from(activeFilePaths) as string[] }
+                    filePath: { notIn: activeBothForms }
                 }
             }).catch(() => {});
         }
@@ -302,8 +378,15 @@ export async function GET(request: Request) {
                 // #203 Phase 1: which attached volume this annual belongs to (null = none yet), so
                 // the Annuals panel can tell "claimed" apart from "still on its own".
                 attachedVolumeId: (issue as any).attachedVolumeId ?? null,
+                // #203 round 3: an attached row names its volume on the page ("The Amazing
+                // Spider-Man '96 · Annual #1") — seven volumes' "#1" were indistinguishable.
+                attachmentName: (issue as any).attachedVolumeId ? ((issue as any).attachedVolume?.name ?? null) : null,
+                // Sorting by release date on the page (annuals fall in between the issues).
+                releaseDate: issue.releaseDate ?? null,
                 isCollected,
                 collectionName: isCollected ? (issue as any).attachedVolume?.name ?? null : null,
+                // #203 COLLECTED coverage: which run issues this book reprints ("1-6, 8"), books only.
+                coversIssues: isCollected ? ((issue as any).coversIssues ?? null) : null,
                 // Issue #200: normalize vulgar fractions ("½" → 0.5) or parseFloat yields NaN,
                 // which serializes to null and turned half-issue requests into "#null" searches.
                 // The raw number rides along so the page can always fall back to a real string.
@@ -331,11 +414,36 @@ export async function GET(request: Request) {
         }
     }
 
+    // #203 COLLECTED coverage (field report by robotshavehearts2): an OWNED collected book that
+    // says which run issues it reprints takes those issues out of "missing" — you have the story,
+    // just not the single. They move to `coveredIssues`, each naming the book that covers it, so a
+    // page can still show them (and a request can still be made deliberately). Coverage names
+    // main-run numbers only; annuals are never covered by it.
+    const coveredIssues: any[] = [];
+    const coveringBooks = collectedEditions
+        .filter(b => typeof b.coversIssues === 'string' && b.coversIssues.trim())
+        .map(b => ({ book: b, set: expandCoverage(b.coversIssues) }))
+        .filter(({ set }) => set.length > 0);
+    if (coveringBooks.length > 0 && missingIssues.length > 0) {
+        const stillMissing: any[] = [];
+        for (const m of missingIssues) {
+            const hit = m.isAnnual ? undefined : coveringBooks.find(({ set }) => isCovered(m.number, set));
+            if (hit) {
+                coveredIssues.push({ ...m, coveredBy: { id: hit.book.id, number: hit.book.number, name: hit.book.name, collectionName: hit.book.collectionName } });
+            } else {
+                stillMissing.push(m);
+            }
+        }
+        missingIssues.length = 0;
+        missingIssues.push(...stillMissing);
+    }
+
     // #203: annuals read AFTER the main run (Mylar-style), then by number within each domain.
     const domainThenNumber = (a: any, b: any) =>
         ((a.isAnnual ? 1 : 0) - (b.isAnnual ? 1 : 0)) || ((a.parsedNum ?? 0) - (b.parsedNum ?? 0));
     downloadedIssues.sort(domainThenNumber);
     missingIssues.sort(domainThenNumber);
+    coveredIssues.sort(domainThenNumber);
     // Collections read in the order the user numbered them — that curation IS the reading order.
     const byNumber = (a: any, b: any) => (a.parsedNum ?? 0) - (b.parsedNum ?? 0);
     collectedEditions.sort(byNumber);
@@ -410,6 +518,7 @@ export async function GET(request: Request) {
       },
       downloadedIssues,
       missingIssues,
+      coveredIssues,
       collectedEditions,
       missingCollectedEditions,
       duplicates: duplicatesList

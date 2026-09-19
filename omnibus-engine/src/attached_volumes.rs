@@ -69,6 +69,9 @@ struct LaneIssue {
 struct LaneVolume {
     name: Option<String>,
     start_year: Option<i32>,
+    /// The provider's own text — for a one-book collected volume it may state "Collects #1-6"
+    /// (coverage prefill, #203 COLLECTED).
+    description: Option<String>,
 }
 
 pub async fn sync_request(db: &Db, payload: AttachSyncRequest) -> anyhow::Result<Vec<AttachSummary>> {
@@ -136,6 +139,10 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
     let source: String = row.try_get("metadataSource").unwrap_or_else(|_| "COMICVINE".to_string());
     let volume_id: String = row.get("volumeId");
     let kind: String = row.try_get("kind").unwrap_or_else(|_| "ANNUAL".to_string());
+    // #203 LOCAL: no provider volume to fetch — the pass is the name claim plus series.json coverage.
+    if source == "LOCAL" {
+        return sync_local_attachment(db, attachment_id, &series_id, &kind).await;
+    }
     // #203 COLLECTED: the lane serves both kinds now, so isAnnual follows the ATTACHMENT's kind —
     // a trade is not an annual, and flagging it as one would put it in the annual numbering domain,
     // label it "Annual #N" in every view, and sort it among comics it merely reprints. Written as a
@@ -167,6 +174,47 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
         ..Default::default()
     };
 
+    // The name-anchoring rule needs the parent's name and every attachment's name on this series.
+    // THIS attachment takes the provider's fresh name (its DB name is still empty on the very first
+    // sync); the others keep what earlier syncs stored.
+    let (series_name, series_folder): (String, String) = sqlx::query(r#"SELECT name, "folderPath" FROM "Series" WHERE id = $1"#)
+        .bind(&series_id)
+        .fetch_optional(&db.pool)
+        .await?
+        .map(|r| (r.try_get("name").unwrap_or_default(), r.try_get("folderPath").unwrap_or_default()))
+        .unwrap_or_default();
+
+    // #203 COLLECTED coverage: what series.json remembered per book of THIS volume (a restore
+    // after a wipe recreates the book rows here, and their coverage must come back with no calls).
+    let series_json_books: std::collections::HashMap<String, String> = if kind == "COLLECTED" && !series_folder.is_empty() {
+        let folder = series_folder.clone();
+        let (src, vid) = (source.clone(), volume_id.clone());
+        tokio::task::spawn_blocking(move || crate::scanner::read_series_json(std::path::Path::new(&folder)))
+            .await
+            .ok()
+            .flatten()
+            .map(|sj| sj.attached_volumes.into_iter()
+                .filter(|a| a.source == src && a.volume_id == vid)
+                .flat_map(|a| a.books)
+                .collect())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let single_book_volume = issues.len() == 1;
+    let name_refs: Vec<AttachmentNameRef> = sqlx::query(r#"SELECT id, name, kind FROM "AttachedVolume" WHERE "seriesId" = $1"#)
+        .bind(&series_id)
+        .fetch_all(&db.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            let id: String = r.get("id");
+            let stored: String = r.try_get::<Option<String>, _>("name").unwrap_or(None).unwrap_or_default();
+            let name = if id == attachment_id { volume.name.clone().unwrap_or(stored) } else { stored };
+            AttachmentNameRef { id, name, kind: r.try_get("kind").unwrap_or_else(|_| "ANNUAL".to_string()) }
+        })
+        .collect();
+
     for issue in &issues {
         // ---- ID-anchored: the row this provider issue already owns, wherever the user moved its
         //      number to. Nothing else in the lane is a candidate.
@@ -175,7 +223,7 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
                       CAST("hasCustomMetadata" AS INTEGER) AS "hasCustomMetadata",
                       CAST("hasCustomCover" AS INTEGER) AS "hasCustomCover",
                       writers, artists, "coverArtists", colorists, letterers, characters, teams, locations,
-                      inker, editor, translator
+                      inker, editor, translator, "coversIssues"
                FROM "Issue" WHERE "attachedVolumeId" = $1 AND "metadataId" = $2"#,
         )
         .bind(attachment_id)
@@ -196,11 +244,21 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
             None
         };
 
-        // ---- The claim: a file-backed annual row nobody has bound yet, whose NUMBER matches this
-        //      provider issue. Silent by decision (2026-08-26) — the summary is the honesty, and
-        //      detach / the editor's exact-id field are the undo.
-        let claimed_row = if existing.is_none() && adopted_row.is_none() && claim && kind == "ANNUAL" {
-            find_claim_candidate(db, &series_id, &issue.number).await?
+        // ---- The claim, most specific signal first. By NAME (either kind): a file-backed row
+        //      nobody has bound yet whose filename names THIS volume and parses to this number —
+        //      "The Amazing Spider-Man '96 #001" sitting as main-run #1. Then, annual lanes only,
+        //      by NUMBER: an unbound annual row whose number matches. Silent by decision
+        //      (2026-08-26) — the summary is the honesty, and detach / the editor's exact-id field
+        //      are the undo.
+        let claimed_row = if existing.is_none() && adopted_row.is_none() && claim {
+            match find_claim_candidate_by_name(db, &series_id, &series_name, attachment_id, &name_refs, &issue.number).await? {
+                Some(r) => {
+                    log::info!("[Attached] Claimed a file by NAME for volume {} #{} on series {}.", volume_id, issue.number, series_id);
+                    Some(r)
+                }
+                None if kind == "ANNUAL" => find_claim_candidate(db, &series_id, &issue.number).await?,
+                None => None,
+            }
         } else {
             None
         };
@@ -238,16 +296,30 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
         let editor_val = merge_credit_json(col("editor"), &c.editors, locked, file_priority);
         let translator_val = merge_credit_json(col("translator"), &c.translators, locked, file_priority);
 
+        // #203 COLLECTED coverage prefill — fill-blank ONLY, from series.json (a restore), else the
+        // book's own "Collects #1-6", else a one-book volume's text. A value already there is the
+        // user's and is never touched; annual lanes never carry coverage.
+        let covers_fill: Option<String> = crate::coverage::coverage_fill_for(
+            &kind,
+            target.and_then(|r| r.try_get::<Option<String>, _>("coversIssues").unwrap_or(None)).as_deref(),
+            series_json_books.get(&issue.source_id).map(|s| s.as_str()),
+            issue.description.as_deref(),
+            volume.description.as_deref(),
+            single_book_volume,
+        );
+
         let res = if let Some(t) = target {
             let row_id: String = t.get("id");
             // `number` is ABSENT from this UPDATE on purpose: inside an attached lane the number is
             // the user's curation, and the id is the anchor. A claim additionally stamps the link.
+            // coversIssues is fill-blank: COALESCE over the existing value (blank = empty).
             sqlx::query(&format!(
                 r#"UPDATE "Issue" SET "attachedVolumeId"=$1, "metadataId"=$2, "metadataSource"=$3, "isAnnual"={annual},
                    name=$4, description=$5, "releaseDate"=$6, "coverUrl"=$7, "matchState"=$8,
                    writers=$9, artists=$10, "coverArtists"=$11, colorists=$12, letterers=$13,
-                   characters=$14, teams=$15, locations=$16, inker=$17, editor=$18, translator=$19
-                   WHERE id=$20"#,
+                   characters=$14, teams=$15, locations=$16, inker=$17, editor=$18, translator=$19,
+                   "coversIssues"=COALESCE(NULLIF("coversIssues", ''), $20)
+                   WHERE id=$21"#,
                 annual = annual_lit
             ))
             .bind(attachment_id)
@@ -269,6 +341,7 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
             .bind(&inker_val)
             .bind(&editor_val)
             .bind(&translator_val)
+            .bind(&covers_fill)
             .bind(&row_id)
             .execute(&db.pool)
             .await
@@ -282,8 +355,8 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
                    (id, "seriesId", "attachedVolumeId", "metadataId", "metadataSource", number, "isAnnual", status,
                     name, description, "releaseDate", "coverUrl", "matchState",
                     writers, artists, "coverArtists", colorists, letterers, characters, teams, locations,
-                    inker, editor, translator, "createdAt", "updatedAt")
-                   VALUES ($1,$2,$3,$4,$5,$6,{annual},'WANTED',$7,$8,$9,$10,'MATCHED',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,{now},{now})"#,
+                    inker, editor, translator, "coversIssues", "createdAt", "updatedAt")
+                   VALUES ($1,$2,$3,$4,$5,$6,{annual},'WANTED',$7,$8,$9,$10,'MATCHED',$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,{now},{now})"#,
                 annual = annual_lit,
                 now = db.now_expr()
             ))
@@ -308,6 +381,7 @@ async fn sync_attachment(db: &Db, client: &Client, attachment_id: &str, claim: b
             .bind(&inker_val)
             .bind(&editor_val)
             .bind(&translator_val)
+            .bind(&covers_fill)
             .execute(&db.pool)
             .await
         };
@@ -380,7 +454,7 @@ async fn find_unbound_by_id(
                   CAST("hasCustomMetadata" AS INTEGER) AS "hasCustomMetadata",
                   CAST("hasCustomCover" AS INTEGER) AS "hasCustomCover",
                   writers, artists, "coverArtists", colorists, letterers, characters, teams, locations,
-                  inker, editor, translator
+                  inker, editor, translator, "coversIssues"
            FROM "Issue"
            WHERE "seriesId" = $1 AND "isAnnual" = true AND "attachedVolumeId" IS NULL
              AND "metadataId" = $2 AND "metadataSource" = $3"#,
@@ -401,7 +475,7 @@ async fn find_claim_candidate(db: &Db, series_id: &str, number: &str) -> anyhow:
                   CAST("hasCustomMetadata" AS INTEGER) AS "hasCustomMetadata",
                   CAST("hasCustomCover" AS INTEGER) AS "hasCustomCover",
                   writers, artists, "coverArtists", colorists, letterers, characters, teams, locations,
-                  inker, editor, translator
+                  inker, editor, translator, "coversIssues"
            FROM "Issue"
            WHERE "seriesId" = $1 AND "isAnnual" = true AND "attachedVolumeId" IS NULL AND "filePath" IS NOT NULL"#,
     )
@@ -412,6 +486,219 @@ async fn find_claim_candidate(db: &Db, series_id: &str, number: &str) -> anyhow:
     Ok(rows.into_iter().find(|r| {
         let n: String = r.try_get("number").unwrap_or_default();
         is_same_issue(&n, number)
+    }))
+}
+
+/// #203 LOCAL (field report by robotshavehearts2): a collected edition — or an annual run — the
+/// provider has no volume for. There is nothing to fetch: its books are this series' file-backed
+/// rows whose FILENAMES carry the attachment's name (the beta.018 rule), bound here — the Node
+/// reconciler binds brand-new files the same way — and their coverage comes back from series.json
+/// by number after a wipe (the writer records a local edition's books as "local:<number>").
+async fn sync_local_attachment(db: &Db, attachment_id: &str, series_id: &str, kind: &str) -> anyhow::Result<AttachSummary> {
+    let (series_name, series_folder, att_name, att_volume_id): (String, String, Option<String>, String) = sqlx::query(
+        r#"SELECT s.name AS sname, s."folderPath" AS sfolder, a.name AS aname, a."volumeId" AS avol
+           FROM "AttachedVolume" a JOIN "Series" s ON s.id = a."seriesId" WHERE a.id = $1"#,
+    )
+    .bind(attachment_id)
+    .fetch_optional(&db.pool)
+    .await?
+    .map(|r| (
+        r.try_get::<String, _>("sname").unwrap_or_default(),
+        r.try_get::<Option<String>, _>("sfolder").unwrap_or(None).unwrap_or_default(),
+        r.try_get::<Option<String>, _>("aname").unwrap_or(None),
+        r.try_get::<String, _>("avol").unwrap_or_default(),
+    ))
+    .unwrap_or_default();
+    let annual_lit = if kind == "ANNUAL" { "true" } else { "false" };
+
+    let name_refs: Vec<AttachmentNameRef> = sqlx::query(r#"SELECT id, name, kind FROM "AttachedVolume" WHERE "seriesId" = $1"#)
+        .bind(series_id)
+        .fetch_all(&db.pool)
+        .await?
+        .into_iter()
+        .map(|r| AttachmentNameRef {
+            id: r.get("id"),
+            name: r.try_get::<Option<String>, _>("name").unwrap_or(None).unwrap_or_default(),
+            kind: r.try_get("kind").unwrap_or_else(|_| "ANNUAL".to_string()),
+        })
+        .collect();
+
+    // series.json's memory of this edition's books, by number ("local:<n>" → covers).
+    let sj_books: std::collections::HashMap<String, String> = if kind == "COLLECTED" && !series_folder.is_empty() {
+        let folder = series_folder.clone();
+        let vol = att_volume_id.clone();
+        tokio::task::spawn_blocking(move || crate::scanner::read_series_json(std::path::Path::new(&folder)))
+            .await
+            .ok()
+            .flatten()
+            .map(|sj| sj.attached_volumes.into_iter()
+                .filter(|a| a.source == "LOCAL" && a.volume_id == vol)
+                .flat_map(|a| a.books)
+                .collect())
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
+    };
+    let sj_covers = |number: &str| sj_books.get(&format!("local:{}", number)).map(|s| s.as_str());
+
+    let mut summary = AttachSummary { attachment_id: attachment_id.to_string(), name: att_name.clone(), ..Default::default() };
+
+    // 1. The claim: unbound file-backed rows whose filename names this edition. The row keeps its
+    //    number as parsed under the edition's name, takes a lane-and-number identity that survives
+    //    a wipe, a "Vol. N" title unless it already has a real one, and any remembered coverage.
+    let candidates = sqlx::query(
+        r#"SELECT id, "filePath", "coversIssues" FROM "Issue"
+           WHERE "seriesId" = $1 AND "attachedVolumeId" IS NULL AND "filePath" IS NOT NULL AND "filePath" <> ''"#,
+    )
+    .bind(series_id)
+    .fetch_all(&db.pool)
+    .await?;
+    for r in &candidates {
+        let file: String = r.get("filePath");
+        let base = std::path::Path::new(&file).file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let Some(m) = attachment_for_filename(&base, &series_name, &name_refs) else { continue };
+        if m.id != attachment_id { continue; }
+        let row_id: String = r.get("id");
+        let existing_covers: Option<String> = r.try_get("coversIssues").unwrap_or(None);
+        let covers_fill = crate::coverage::coverage_fill_for(kind, existing_covers.as_deref(), sj_covers(&m.number), None, None, false);
+        let local_id = format!("local_{}_{}", attachment_id, m.number);
+        let vol_name = format!("Vol. {}", m.number);
+        sqlx::query(&format!(
+            r#"UPDATE "Issue" SET "attachedVolumeId"=$1, "isAnnual"={annual}, "matchState"='MATCHED', "metadataId"=$2, "metadataSource"='LOCAL',
+               number=$3, name=CASE WHEN name IS NULL OR name = '' OR name LIKE 'Issue %' THEN $4 ELSE name END,
+               "coversIssues"=COALESCE(NULLIF("coversIssues", ''), $5) WHERE id=$6"#,
+            annual = annual_lit
+        ))
+        .bind(attachment_id)
+        .bind(&local_id)
+        .bind(&m.number)
+        .bind(&vol_name)
+        .bind(&covers_fill)
+        .bind(&row_id)
+        .execute(&db.pool)
+        .await?;
+        summary.claimed += 1;
+    }
+
+    // 2. Books already in the lane: coverage restored fill-blank from series.json.
+    let bound = sqlx::query(r#"SELECT id, number, "coversIssues" FROM "Issue" WHERE "attachedVolumeId" = $1"#)
+        .bind(attachment_id)
+        .fetch_all(&db.pool)
+        .await?;
+    for r in &bound {
+        let number: String = r.get("number");
+        let existing: Option<String> = r.try_get("coversIssues").unwrap_or(None);
+        if let Some(fill) = crate::coverage::coverage_fill_for(kind, existing.as_deref(), sj_covers(&number), None, None, false) {
+            let id: String = r.get("id");
+            sqlx::query(r#"UPDATE "Issue" SET "coversIssues"=$1 WHERE id=$2"#).bind(&fill).bind(&id).execute(&db.pool).await?;
+            summary.updated += 1;
+        }
+    }
+    summary.total = bound.len() as i64;
+
+    let _ = sqlx::query(&format!(
+        r#"UPDATE "AttachedVolume" SET "issueCount"=$1, "lastSyncedAt"={now_utc}, "updatedAt"={now} WHERE id=$2"#,
+        now_utc = db.now_utc_ts_expr(),
+        now = db.now_expr()
+    ))
+    .bind(summary.total)
+    .bind(attachment_id)
+    .execute(&db.pool)
+    .await;
+
+    log::info!(
+        "[Attached] LOCAL \"{}\" on series {}: claimed {} file(s) by name, {} coverage value(s) restored, {} book(s) in the lane.",
+        att_name.clone().unwrap_or_else(|| attachment_id.to_string()), series_id, summary.claimed, summary.updated, summary.total
+    );
+    Ok(summary)
+}
+
+/// One attached volume as the name-anchoring rule sees it.
+#[derive(Debug, Clone)]
+pub(crate) struct AttachmentNameRef {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+/// Which attachment a filename belongs to by NAME, and the number it parses to under that name.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AttachmentFileMatch {
+    pub id: String,
+    pub kind: String,
+    pub number: String,
+}
+
+/// #203 name-anchored attachment (anacronismo, 2026-09-09): "The Amazing Spider-Man '96 #001
+/// (1996).cbz" carries no "Annual" token, so it parses as main-run #1 and collides with the 1963 #1
+/// while the attached one-off it belongs to shows "0 of 1 owned". The filename is the only signal,
+/// and a good one: a file whose name STARTS WITH an attached volume's own name belongs to it.
+///   - token-prefix match with the scanner's series-prefix rules (case, separators, glue guard);
+///   - an attachment whose name is itself a token-prefix of the SERIES name (equal included) can
+///     never match, or every main-run file would;
+///   - among several matches the most specific name wins (most tokens, then longest);
+///   - the number is parsed with the attachment's name as the series hint.
+///
+/// Exact twin of attachmentForFilename (src/lib/utils/attachment-name.ts) — keep them identical.
+pub(crate) fn attachment_for_filename(file_name: &str, series_name: &str, attachments: &[AttachmentNameRef]) -> Option<AttachmentFileMatch> {
+    let token_count = |s: &str| s.split(|c: char| !c.is_ascii_alphanumeric()).filter(|t| !t.is_empty()).count();
+    let mut best: Option<(&AttachmentNameRef, usize, usize)> = None;
+    for a in attachments {
+        let name = a.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        // The parent's own name — or a shorter prefix of it — names the parent's files, not a lane's.
+        if crate::scanner::strip_series_prefix(series_name, name).is_some() {
+            continue;
+        }
+        if crate::scanner::strip_series_prefix(file_name, name).is_none() {
+            continue;
+        }
+        let (tokens, len) = (token_count(name), name.len());
+        if best.is_none_or(|(_, t, l)| tokens > t || (tokens == t && len > l)) {
+            best = Some((a, tokens, len));
+        }
+    }
+    let (a, _, _) = best?;
+    let (number, _) = crate::scanner::issue_descriptor_from_filename(file_name, Some(a.name.trim()));
+    Some(AttachmentFileMatch { id: a.id.clone(), kind: a.kind.clone(), number })
+}
+
+/// The name-anchored claim: a file-backed row bound to no attachment — main run OR annual — whose
+/// FILENAME names this attached volume and parses to `number` under it. Runs before the
+/// number-anchored annual claim, because a name is the more specific signal.
+async fn find_claim_candidate_by_name(
+    db: &Db,
+    series_id: &str,
+    series_name: &str,
+    attachment_id: &str,
+    attachments: &[AttachmentNameRef],
+    number: &str,
+) -> anyhow::Result<Option<sqlx::any::AnyRow>> {
+    let rows = sqlx::query(
+        r#"SELECT id, number, name, description, "releaseDate", "coverUrl", "matchState",
+                  CAST("hasCustomMetadata" AS INTEGER) AS "hasCustomMetadata",
+                  CAST("hasCustomCover" AS INTEGER) AS "hasCustomCover",
+                  writers, artists, "coverArtists", colorists, letterers, characters, teams, locations,
+                  inker, editor, translator, "filePath", "coversIssues"
+           FROM "Issue"
+           WHERE "seriesId" = $1 AND "attachedVolumeId" IS NULL AND "filePath" IS NOT NULL AND "filePath" <> ''"#,
+    )
+    .bind(series_id)
+    .fetch_all(&db.pool)
+    .await?;
+
+    Ok(rows.into_iter().find(|r| {
+        let file: String = r.try_get("filePath").unwrap_or_default();
+        let base = std::path::Path::new(&file)
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        matches!(
+            attachment_for_filename(&base, series_name, attachments),
+            Some(m) if m.id == attachment_id && is_same_issue(&m.number, number)
+        )
     }))
 }
 
@@ -431,7 +718,7 @@ async fn fetch_comicvine_lane(db: &Db, client: &Client, volume_id: &str) -> anyh
     let vol_url = format!("https://comicvine.gamespot.com/api/volume/4050-{}/", volume_id);
     let vol_req = client
         .get(&vol_url)
-        .query(&[("api_key", api_key.as_str()), ("format", "json"), ("field_list", "name,start_year,count_of_issues")])
+        .query(&[("api_key", api_key.as_str()), ("format", "json"), ("field_list", "name,start_year,count_of_issues,description,deck")])
         .header("User-Agent", "Omnibus/1.0")
         .timeout(Duration::from_secs(15))
         .build()?;
@@ -452,6 +739,10 @@ async fn fetch_comicvine_lane(db: &Db, client: &Client, volume_id: &str) -> anyh
     volume.name = vol_json["results"]["name"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string());
     volume.start_year = vol_json["results"]["start_year"].as_str().and_then(|s| s.trim().parse::<i32>().ok())
         .or_else(|| vol_json["results"]["start_year"].as_i64().map(|v| v as i32));
+    volume.description = vol_json["results"]["description"].as_str()
+        .or_else(|| vol_json["results"]["deck"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
 
     let mut issues = Vec::new();
     let mut offset = 0i32;
@@ -534,6 +825,7 @@ async fn fetch_metron_lane(db: &Db, client: &Client, volume_id: &str) -> anyhow:
     let volume = LaneVolume {
         name: data["series"].as_str().or_else(|| data["name"].as_str()).filter(|s| !s.is_empty()).map(|s| s.to_string()),
         start_year: data["year_began"].as_i64().map(|y| y as i32).filter(|y| *y != 0),
+        description: data["desc"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
     };
 
     let mut raw: Vec<serde_json::Value> = Vec::new();
@@ -600,6 +892,75 @@ mod tests {
         db
     }
 
+    // ==== #203 name-anchored attachment. The rule's cases are the EXACT twin of
+    // __tests__/lib/utils/attachment-name.test.ts — keep both in step. ====
+
+    fn aref(id: &str, name: &str, kind: &str) -> AttachmentNameRef {
+        AttachmentNameRef { id: id.into(), name: name.into(), kind: kind.into() }
+    }
+    const ASM: &str = "The Amazing Spider-Man";
+
+    #[test]
+    fn name_rule_claims_the_96_one_off_and_parses_its_number_under_that_name() {
+        let refs = [aref("attAnn", "The Amazing Spider-Man Annual", "ANNUAL"), aref("att96", "The Amazing Spider-Man '96", "ANNUAL")];
+        assert_eq!(
+            attachment_for_filename("The Amazing Spider-Man '96 #001 (1996).cbz", ASM, &refs),
+            Some(AttachmentFileMatch { id: "att96".into(), kind: "ANNUAL".into(), number: "1".into() })
+        );
+        // The filename that IS just the volume name is that volume's one-shot.
+        assert_eq!(attachment_for_filename("The Amazing Spider-Man '96 (1996).cbz", ASM, &refs[1..]).map(|m| m.number), Some("1".into()));
+        // Case and separators are the scanner's rules, not the user's typing.
+        assert_eq!(attachment_for_filename("the amazing spider-man '96 - 001.cbz", ASM, &refs[1..]).map(|m| m.number), Some("1".into()));
+    }
+
+    #[test]
+    fn name_rule_never_hands_the_parents_own_files_to_a_lane() {
+        let refs = [aref("att96", "The Amazing Spider-Man '96", "ANNUAL"), aref("attAnn", "The Amazing Spider-Man Annual", "ANNUAL"), aref("attTpb", "The Amazing Spider-Man: Coming Home", "COLLECTED")];
+        assert!(attachment_for_filename("The Amazing Spider-Man #001 (1963).cbz", ASM, &refs).is_none());
+        // An attachment named exactly like the series (or a prefix of it) can never match.
+        assert!(attachment_for_filename("The Amazing Spider-Man #001 (1963).cbz", ASM, &[aref("same", "The Amazing Spider-Man", "COLLECTED")]).is_none());
+        assert!(attachment_for_filename("Amazing Spider-Man #001 (1963).cbz", "Amazing Spider-Man Annual", &[aref("short", "Amazing Spider-Man", "COLLECTED")]).is_none());
+    }
+
+    #[test]
+    fn name_rule_respects_the_glue_guard_and_token_boundaries() {
+        // "'96" is a token; "1996" is a different token → not the '96 volume.
+        assert!(attachment_for_filename("The Amazing Spider-Man 1996 #001 (1996).cbz", ASM, &[aref("att96", "The Amazing Spider-Man '96", "ANNUAL")]).is_none());
+        // "Annuals" is not "Annual" (glue guard).
+        assert!(attachment_for_filename("The Amazing Spider-Man Annuals #001.cbz", ASM, &[aref("attAnn", "The Amazing Spider-Man Annual", "ANNUAL")]).is_none());
+    }
+
+    #[test]
+    fn name_rule_prefers_the_most_specific_name_and_carries_the_kind() {
+        let annual = aref("a", "X-Men Annual", "ANNUAL");
+        let annual95 = aref("a95", "X-Men Annual '95", "ANNUAL");
+        assert_eq!(attachment_for_filename("X-Men Annual '95 #001 (1995).cbz", "X-Men", &[annual.clone(), annual95.clone()]).map(|m| m.id), Some("a95".into()));
+        assert_eq!(attachment_for_filename("X-Men Annual #003 (1979).cbz", "X-Men", &[annual95, annual]).map(|m| m.id), Some("a".into()));
+        assert_eq!(
+            attachment_for_filename("The Amazing Spider-Man: Coming Home Vol. 1.cbz", ASM, &[aref("attTpb", "The Amazing Spider-Man: Coming Home", "COLLECTED")]),
+            Some(AttachmentFileMatch { id: "attTpb".into(), kind: "COLLECTED".into(), number: "1".into() })
+        );
+        // Nameless attachments are skipped.
+        assert_eq!(attachment_for_filename("The Amazing Spider-Man '96 #001.cbz", ASM, &[aref("x", "", "ANNUAL"), aref("z", "The Amazing Spider-Man '96", "ANNUAL")]).map(|m| m.id), Some("z".into()));
+    }
+
+    #[tokio::test]
+    async fn name_claim_finds_the_unbound_row_whose_file_names_this_volume_and_number() {
+        let db = fixture("nameclaim").await;
+        // The field shape: the '96 file scanned as MAIN-RUN #1 next to the real 1963 #1.
+        insert_issue(&db, "row96", "1", false, Some("/c/ASM/The Amazing Spider-Man '96 #001 (1996).cbz"), None, Some("unmatched_a")).await;
+        insert_issue(&db, "row63", "1", false, Some("/c/ASM/The Amazing Spider-Man #001 (1963).cbz"), None, Some("300001")).await;
+        // Already bound rows are never candidates, whatever they are named.
+        insert_issue(&db, "bound", "1", true, Some("/c/ASM/The Amazing Spider-Man '96 #001 (1996).cbz"), Some("other"), Some("400001")).await;
+        let refs = [aref("att96", "The Amazing Spider-Man '96", "ANNUAL"), aref("attAnn", "The Amazing Spider-Man Annual", "ANNUAL")];
+
+        let hit = find_claim_candidate_by_name(&db, "s1", ASM, "att96", &refs, "1").await.unwrap();
+        assert_eq!(hit.map(|r| r.get::<String, _>("id")), Some("row96".to_string()));
+        // The same file is nobody else's: the Annual lane sees nothing for #1, and '96 has no #2.
+        assert!(find_claim_candidate_by_name(&db, "s1", ASM, "attAnn", &refs, "1").await.unwrap().is_none());
+        assert!(find_claim_candidate_by_name(&db, "s1", ASM, "att96", &refs, "2").await.unwrap().is_none());
+    }
+
     async fn insert_issue(db: &Db, id: &str, number: &str, annual: bool, file: Option<&str>, attached: Option<&str>, meta_id: Option<&str>) {
         sqlx::query(&format!(
             r#"INSERT INTO "Issue" (id, "seriesId", number, "isAnnual", "filePath", "attachedVolumeId", "metadataId", "metadataSource", status)
@@ -631,6 +992,65 @@ mod tests {
         assert!(find_claim_candidate(&db, "s1", "2").await.expect("query ok").is_none());
         // Zero-padding is the same number (is_same_issue), so an "003" row still answers to "3".
         assert!(find_claim_candidate(&db, "s1", "003").await.expect("query ok").is_some());
+    }
+
+    /// The LOCAL sync reads the series (name, folder) too, and restores coverage from a real
+    /// series.json in that folder — so this fixture carries a Series table and a temp folder.
+    async fn fixture_local(tag: &str) -> (Db, std::path::PathBuf) {
+        let base = std::env::temp_dir().join(format!("omnibus_avl_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).expect("create fixture dir");
+        let db_file = base.join("avl.db");
+        std::fs::File::create(&db_file).expect("pre-create sqlite file");
+        let db_url = format!("file:{}", db_file.to_string_lossy().replace('\\', "/"));
+        let db = Db::connect(&db_url, 2).await.expect("connect file-backed sqlite");
+        for ddl in [
+            r#"CREATE TABLE "Series" (id TEXT PRIMARY KEY, name TEXT, "folderPath" TEXT)"#,
+            r#"CREATE TABLE "Issue" (id TEXT PRIMARY KEY, "seriesId" TEXT, number TEXT, "isAnnual" INTEGER DEFAULT 0,
+                "attachedVolumeId" TEXT, "metadataId" TEXT, "metadataSource" TEXT, "filePath" TEXT, status TEXT,
+                name TEXT, "matchState" TEXT, "coversIssues" TEXT)"#,
+            r#"CREATE TABLE "AttachedVolume" (id TEXT PRIMARY KEY, "seriesId" TEXT, "metadataSource" TEXT,
+                "volumeId" TEXT, kind TEXT, name TEXT, "startYear" INTEGER, "issueCount" INTEGER DEFAULT 0,
+                "lastSyncedAt" TEXT, "createdAt" TEXT, "updatedAt" TEXT)"#,
+        ] {
+            sqlx::query(ddl).execute(&db.pool).await.expect("create schema");
+        }
+        (db, base)
+    }
+
+    // #203 LOCAL: a collected edition the provider has no volume for.
+    #[tokio::test]
+    async fn local_sync_claims_files_by_name_and_restores_coverage_from_series_json() {
+        let (db, folder) = fixture_local("local").await;
+        std::fs::write(
+            folder.join("series.json"),
+            r#"{"version":"1.0.2","metadata":{"type":"comicSeries","name":"Saga"},"omnibus":{"attached_volumes":[
+                {"source":"LOCAL","volume_id":"local_abc","kind":"COLLECTED","name":"Saga Compendium",
+                 "books":[{"issue_id":"local:1","number":"1","covers":"1-54"}]}]}}"#,
+        ).unwrap();
+        let folder_str = folder.to_string_lossy().replace('\\', "/");
+        sqlx::query(r#"INSERT INTO "Series" (id, name, "folderPath") VALUES ('s1', 'Saga', $1)"#).bind(&folder_str).execute(&db.pool).await.unwrap();
+        sqlx::query(r#"INSERT INTO "AttachedVolume" (id, "seriesId", "metadataSource", "volumeId", kind, name) VALUES ('att_local', 's1', 'LOCAL', 'local_abc', 'COLLECTED', 'Saga Compendium')"#).execute(&db.pool).await.unwrap();
+        // The scan's view after a wipe: the compendium file indexed as an unmatched main-run #1, beside the real #1.
+        insert_issue(&db, "book", "1", false, Some("/c/Saga/Saga Compendium 01.cbz"), None, Some("unmatched_x")).await;
+        insert_issue(&db, "main1", "1", false, Some("/c/Saga/Saga 001.cbz"), None, Some("300001")).await;
+
+        let summary = sync_local_attachment(&db, "att_local", "s1", "COLLECTED").await.unwrap();
+        assert_eq!((summary.claimed, summary.updated, summary.total), (1, 0, 1));
+
+        let row = sqlx::query(r#"SELECT "attachedVolumeId", "metadataId", "matchState", "coversIssues", name, number FROM "Issue" WHERE id = 'book'"#).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(row.get::<Option<String>, _>("attachedVolumeId"), Some("att_local".to_string()));
+        assert_eq!(row.get::<String, _>("metadataId"), "local_att_local_1");
+        assert_eq!(row.get::<String, _>("matchState"), "MATCHED");
+        assert_eq!(row.get::<Option<String>, _>("coversIssues"), Some("1-54".to_string()), "coverage comes back from series.json by number");
+        assert_eq!(row.get::<Option<String>, _>("name"), Some("Vol. 1".to_string()));
+        // The run's own #1 is nobody's book.
+        let main = sqlx::query(r#"SELECT "attachedVolumeId" FROM "Issue" WHERE id = 'main1'"#).fetch_one(&db.pool).await.unwrap();
+        assert!(main.get::<Option<String>, _>("attachedVolumeId").is_none());
+        // Idempotent: a second pass claims nothing new and restores nothing twice.
+        let again = sync_local_attachment(&db, "att_local", "s1", "COLLECTED").await.unwrap();
+        assert_eq!((again.claimed, again.updated, again.total), (0, 0, 1));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     #[tokio::test]
